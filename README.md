@@ -98,15 +98,35 @@ Los edificios y robots son formas generadas con código, con estilo de maqueta d
 
 La ciudad puede mostrar qué sesiones están trabajando ahora mismo: el edificio correspondiente se ilumina con un indicador de texto («2 trabajando») y el botón **Activas** de la cabecera abre el panel **Ahora**. Solo se enciende con eventos reales; sin eventos no hay luz.
 
-Funciona con *hooks*: un pequeño script (`hooks/agent_city_hook.py`) que Claude Code o Codex ejecutan en cada evento y que envía a la ciudad solo el tipo de evento, la sesión, la carpeta, el nombre de la herramienta y el agente. **Nunca** envía prompts, argumentos ni respuestas. Si la ciudad está cerrada, falla en silencio y no afecta a tus sesiones.
+Funciona con *hooks*: un pequeño script (`hooks/agent_city_hook.py`) que Claude Code o Codex ejecutan en cada evento y que envía a la ciudad solo el tipo de evento, la sesión, la carpeta, el nombre de la herramienta y el agente. **Nunca** envía prompts, respuestas ni argumentos de herramientas; la única excepción es la herramienta Skill de Claude Code, de la que envía un único dato: el nombre de la skill (para el registro de [Uso real](#uso-real)). Si la ciudad está cerrada, falla en silencio y no afecta a tus sesiones.
 
-Para activarlo: abre **Conectar hooks** en el panel Ahora, copia el fragmento de cada herramienta y fusiónalo en `~/.claude/settings.json` y `~/.codex/hooks.json`. La ciudad nunca edita esos archivos. Para saber en qué edificio se enciende una sesión:
+Para activarlo: abre **Conectar hooks** en el panel Ahora, copia el fragmento de cada herramienta y fusiónalo en `~/.claude/settings.json` y `~/.codex/hooks.json`. La ciudad nunca edita esos archivos. Si ya habías conectado los hooks antes de que existiera el registro de uso, **actualiza la copia del script del hook** (`hooks/agent_city_hook.py`) para que empiece a registrar skills; hasta entonces los agentes se registran con normalidad y las skills no. Para saber en qué edificio se enciende una sesión:
 
 1. Si es un subagente con el nombre de un agente que ya colocaste en un edificio, se enciende ese edificio.
 2. Si no, se usa la carpeta de trabajo: añade la **carpeta del proyecto** al crear o editar un proyecto y se enciende el edificio de ese proyecto.
 3. Si nada coincide, aparece como «Sin asignar» con el motivo; la ciudad no inventa un edificio.
 
 Límites: una sesión sin eventos durante 60 s deja de contar como activa (300 s si está dentro de una herramienta larga o esperando un permiso). Cada llamada a una herramienta añade unos 100 ms por el arranque de Python; si lo notas, quita `PostToolUse` del fragmento. El estado vive solo en memoria y se pierde al cerrar la ciudad. De momento solo hay hooks para Claude Code y Codex.
+
+## Uso real
+
+El botón **Uso** de la cabecera abre «Uso real»: qué agentes y skills se han usado de verdad y cuáles no aparecen nunca. Muchos inventarios son enormes y el uso, minúsculo, así que esto ayuda a decidir qué conservar.
+
+**Qué se registra.** Cada lanzamiento de un subagente y cada llamada a la herramienta Skill que ven los hooks de Claude Code. Los contadores son diarios y agregados, en tu base local: nombre, tipo, día y número de veces. No se guardan sesiones, carpetas, prompts ni respuestas.
+
+**Cómo funciona con los hooks.** Es el mismo script de la actividad en vivo (`hooks/agent_city_hook.py`). Para los subagentes ya enviaba el nombre del agente. Para las skills envía un único dato más, el nombre de la skill de las llamadas a la herramienta Skill, y nada más de los argumentos de ninguna herramienta. **Para empezar a registrar skills tienes que actualizar la copia del hook** que usas con Claude Code (la ciudad nunca edita tus archivos de configuración); si todavía envía la versión anterior, el diálogo lo avisa y los agentes se siguen registrando.
+
+**Importar historial.** El registro en vivo solo cuenta desde que se conectaron los hooks. «Importar historial de Claude Code» lee, tras pedirte confirmación, los archivos de conversación de Claude Code de tu carpeta de usuario únicamente para contar llamadas a skills y a subagentes; no guarda ni muestra nada más y es opt-in. Al terminar muestra cuántos archivos leyó y el rango de fechas.
+
+**Cómo se lee.** El diálogo muestra los diez agentes y las diez skills más usados (últimos 30 días o todo), los nombres con uso que no tienen definición en el catálogo (por ejemplo `Explore`, que es un agente integrado) y el resumen «X de Y agentes únicos con uso registrado». La ficha de cada agente o skill tiene una sección «Uso», y la lista un filtro «Uso» (con uso registrado / sin uso registrado). Las copias de un mismo agente o skill cuentan juntas, y un nombre como `plugin:skill` se asocia a `skill` si no existe uno exacto.
+
+**Qué significa «sin uso registrado».** Solo que no consta uso desde la fecha de inicio del registro. No equivale a «no se usa»: el recuento tiene límites.
+
+- No cuenta los slash commands que escribes tú ni lo que ocurre dentro de Codex (no emite estos eventos).
+- No cuenta nada anterior a la conexión de los hooks, salvo que importes el historial.
+- Un hook que no esté actualizado no registra skills.
+
+**Borrar.** «Borrar registro de uso» vacía los contadores tras confirmar. No toca conversaciones ni archivos de Claude Code.
 
 ## Pruebas
 

@@ -2466,3 +2466,97 @@ fieldset {
 .copy-relation.differs {
   color: var(--clay);
 }
+
+/* Real usage: list chip, filter note, detail section and the «Uso real» dialog */
+.usage-chip {
+  justify-self: start;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--green);
+  font: 600 10px/17px "Cascadia Mono", Consolas, monospace;
+  white-space: nowrap;
+}
+.usage-filter-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+}
+.usage-filter-note:empty {
+  display: none;
+}
+.usage {
+  margin: 14px 0;
+}
+.usage h3 {
+  margin: 0 0 4px;
+}
+.usage-state {
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.usage-state[data-used="true"] {
+  color: var(--green);
+}
+.usage-dialog {
+  width: min(680px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+}
+.usage-dialog .dialog-body {
+  overflow-wrap: anywhere;
+}
+.usage-period {
+  width: fit-content;
+  max-width: 100%;
+  margin: 14px 0;
+}
+.usage-summary {
+  margin-bottom: 4px;
+}
+.usage-list {
+  margin-top: 16px;
+}
+.usage-list h3 {
+  margin: 0 0 6px;
+}
+.usage-list ol,
+.usage-unmatched ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.usage-list li,
+.usage-unmatched li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 2px 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.usage-list .text-button {
+  text-align: left;
+}
+.usage-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+.usage-unmatched {
+  margin-top: 16px;
+}
+.usage-unmatched summary {
+  cursor: pointer;
+  margin-bottom: 6px;
+}
+.usage-confirm {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--clay);
+  border-radius: 7px;
+  background: var(--sage);
+}
+.usage-confirm > p {
+  margin: 0;
+}
+.usage-note {
+  min-height: 1.2em;
+}

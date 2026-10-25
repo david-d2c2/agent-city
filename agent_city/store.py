@@ -1,6 +1,6 @@
 """Transactional local snapshots and a separate user organization overlay."""
 import copy
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -16,6 +16,8 @@ from .discover import discover_roots
 
 SUGGESTION_SECONDS = 10
 MAX_BULK_ROOTS = 200
+USAGE_KINDS, USAGE_SOURCES = ('agent', 'skill'), ('claude-code', 'codex', 'history')
+USAGE_RETENTION_DAYS, USAGE_MAX_ITEMS, USAGE_NAME_LIMIT = 400, 5000, 120
 
 
 class Conflict(ValueError):
@@ -24,6 +26,18 @@ class Conflict(ValueError):
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def local_day():
+    return datetime.now().date().isoformat()
+
+
+def usage_name(value):
+    """Trim and cap a usage name; None for non-strings, empty names and control characters."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip()[:USAGE_NAME_LIMIT].strip()
+    return None if not name or any(ord(char) < 32 or ord(char) == 127 for char in name) else name
 
 
 def default_data_dir():
@@ -46,6 +60,9 @@ class Store:
         self.db.execute('PRAGMA busy_timeout=5000')
         self.db.execute('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, organization TEXT NOT NULL)')
+        # Usage counters live beside, never inside, the organization state blob.
+        self.db.execute('CREATE TABLE IF NOT EXISTS usage (day TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, source, kind, name))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS usage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
         with self.db:
             self.db.execute('INSERT OR IGNORE INTO state VALUES (1, ?)', (json.dumps(initial_state()),))
         self._backup()
@@ -266,3 +283,77 @@ class Store:
                 self.db.execute('DELETE FROM history WHERE id=?', (row[0],))
                 self._write(state)
             return self.bootstrap()
+
+    # Real usage: daily counters per (source, kind, name). Only names and counts are stored, never content.
+    def _meta(self, key):
+        row = self.db.execute('SELECT value FROM usage_meta WHERE key=?', (key,)).fetchone()
+        return row[0] if row else None
+
+    def _set_meta(self, key, value, replace=True):
+        self.db.execute('INSERT OR ' + ('REPLACE' if replace else 'IGNORE') + ' INTO usage_meta VALUES (?, ?)', (key, value))
+
+    def _prune_usage(self, today):
+        # At most once per day: rows past the retention window go away.
+        if self._meta('prunedOn') != today:
+            cutoff = (date.fromisoformat(today) - timedelta(days=USAGE_RETENTION_DAYS)).isoformat()
+            self.db.execute('DELETE FROM usage WHERE day < ?', (cutoff,))
+            self._set_meta('prunedOn', today)
+
+    def record_usage(self, source, kind, name, day=None):
+        """Count one real agent or skill call; returns False when the input is not a valid usage."""
+        name = usage_name(name)
+        if source not in USAGE_SOURCES or kind not in USAGE_KINDS or name is None:
+            return False
+        day = day or local_day()
+        with self.lock, self.db:
+            self.db.execute('INSERT INTO usage VALUES (?, ?, ?, ?, 1) ON CONFLICT(day, source, kind, name) DO UPDATE SET count = count + 1', (day, source, kind, name))
+            if source != 'history':
+                self._set_meta('liveSince', day, replace=False)
+                if kind == 'skill':
+                    self._set_meta('skillTracking', '1')
+            self._prune_usage(day)
+        return True
+
+    def live_since(self):
+        with self.lock:
+            return self._meta('liveSince')
+
+    def usage_summary(self, today=None):
+        with self.lock:
+            today = today or local_day()
+            current = date.fromisoformat(today)
+            last7, last30 = ((current - timedelta(days=span - 1)).isoformat() for span in (7, 30))
+            rows = self.db.execute(
+                'SELECT kind, name, SUM(count), SUM(CASE WHEN day BETWEEN ? AND ? THEN count ELSE 0 END), SUM(CASE WHEN day BETWEEN ? AND ? THEN count ELSE 0 END), MAX(day) FROM usage GROUP BY kind, name ORDER BY SUM(count) DESC, name, kind LIMIT ?',
+                (last7, today, last30, today, USAGE_MAX_ITEMS)).fetchall()
+            history = json.loads(self._meta('history') or 'null') or {'importedAt': None, 'from': None, 'to': None, 'files': 0, 'skipped': 0}
+            return {
+                'since': self.db.execute('SELECT MIN(day) FROM usage').fetchone()[0],
+                'liveSince': self._meta('liveSince'),
+                'skillTracking': self._meta('skillTracking') == '1',
+                'history': history,
+                'items': [{'kind': kind, 'name': name, 'total': total, 'last7': week, 'last30': month, 'lastAt': last} for kind, name, total, week, month, last in rows],
+            }
+
+    def replace_usage_history(self, counts, files, skipped, today=None, imported_at=None):
+        """Swap the imported history rows for `counts` {(day, kind, name): n}; returns what was kept.
+
+        Only days before the first live day (and inside the retention window) are kept, so history never double counts live data.
+        """
+        today = today or local_day()
+        floor = (date.fromisoformat(today) - timedelta(days=USAGE_RETENTION_DAYS)).isoformat()
+        with self.lock, self.db:
+            live = self._meta('liveSince')
+            kept = {key: n for key, n in counts.items() if key[0] >= floor and (live is None or key[0] < live)}
+            self.db.execute("DELETE FROM usage WHERE source='history'")
+            self.db.executemany("INSERT INTO usage VALUES (?, 'history', ?, ?, ?)", [(day, kind, name, n) for (day, kind, name), n in kept.items()])
+            days = sorted({day for day, _, _ in kept})
+            result = {kind: sum(n for (_, k, _), n in kept.items() if k == kind) for kind in USAGE_KINDS}
+            result.update(files=files, skipped=skipped, **{'from': days[0] if days else None, 'to': days[-1] if days else None})
+            self._set_meta('history', json.dumps({'importedAt': imported_at or now(), 'from': result['from'], 'to': result['to'], 'files': files, 'skipped': skipped}))
+            return result
+
+    def clear_usage(self):
+        with self.lock, self.db:
+            self.db.execute('DELETE FROM usage')
+            self.db.execute('DELETE FROM usage_meta')

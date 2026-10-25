@@ -11,8 +11,9 @@ import time
 from urllib.parse import urlsplit
 
 from .discover import list_folders
-from .live import LiveState, connect_info, normalize_event, registry_file
+from .live import LiveState, connect_info, normalize_event, registry_file, usage_of
 from .store import Conflict
+from .usage_import import import_claude_history
 
 STATIC = {'/': ('index.html', 'text/html'), '/index.html': ('index.html', 'text/html'), '/styles.css': ('styles.css', 'text/css'), '/app.js': ('app.js', 'text/javascript'), '/scene.js': ('scene.js', 'text/javascript'), '/model.js': ('model.js', 'text/javascript'), '/city3d.js': ('city3d.js', 'text/javascript'), '/city3d-layout.js': ('city3d-layout.js', 'text/javascript'), '/vendor/three.module.js': ('vendor/three.module.js', 'text/javascript'), '/vendor/three.core.js': ('vendor/three.core.js', 'text/javascript')}
 
@@ -85,9 +86,17 @@ def make_server(store, port=4317, web_dir=None):
                 body = json.loads(raw)
                 if not isinstance(body, dict) or set(body) != {'source', 'event'}:
                     raise ValueError('Evento inválido.')
-                self.server.live.apply(body['source'], normalize_event(body['source'], body['event']))
+                event = normalize_event(body['source'], body['event'])
+                self.server.live.apply(body['source'], event)
             except (ValueError, TypeError, KeyError, UnicodeError):
                 return self.error(400, 'Evento inválido.')
+            try:
+                # Counting real usage is best effort: a storage problem never fails the hook.
+                usage = usage_of(event)
+                if usage:
+                    store.record_usage(body['source'], *usage)
+            except Exception:
+                pass
             self.respond(204, b'')
 
         def handle_request(self, mutation=False):
@@ -152,6 +161,19 @@ def make_server(store, port=4317, web_dir=None):
                 if self.command == 'GET' and path == '/api/live':
                     hook = Path(__file__).resolve().parent.parent / 'hooks' / 'agent_city_hook.py'
                     return self.respond(200, {**self.server.live.snapshot(), 'connect': connect_info(hook, sys.executable, registry_file())})
+                if self.command == 'GET' and path == '/api/usage':
+                    return self.respond(200, store.usage_summary())
+                if self.command == 'POST' and path in ('/api/usage/import-history', '/api/usage/clear'):
+                    if body:
+                        raise ValueError('Se requiere un objeto JSON vacío.')
+                    if path == '/api/usage/clear':
+                        store.clear_usage()
+                        return self.respond(200, store.usage_summary())
+                    try:
+                        imported = import_claude_history(store)
+                    except ValueError as error:
+                        return self.error(400, str(error))
+                    return self.respond(200, {'imported': imported, 'usage': store.usage_summary()})
                 if self.command == 'GET' and path == '/api/bootstrap':
                     state = store.bootstrap()
                 elif self.command == 'POST' and path == '/api/roots':

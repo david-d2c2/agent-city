@@ -128,6 +128,29 @@ class StateTests(unittest.TestCase):
         self.assertEqual(normalize_event('codex', ev('Stop', cwd='x' * 1000))['cwd'], 'x' * 1000)
 
 
+    def test_normalize_skill_validation_and_scope(self):
+        skill = ev('PreToolUse', tool_name='Skill', skill='plug:frontend-design')
+        self.assertEqual(normalize_event('claude-code', {**skill, 'tool_input': {'skill': 'other', 'args': 'SECRET'}}), {'hook_event_name': 'PreToolUse', 'session_id': 's1', 'tool_name': 'Skill', 'skill': 'plug:frontend-design'})
+        self.assertEqual(live.usage_of(normalize_event('codex', skill)), ('skill', 'plug:frontend-design'))
+        # Valid names are dropped unless the event is PreToolUse of the Skill tool.
+        for other in (ev('PostToolUse', tool_name='Skill', skill='x'), ev('PreToolUse', tool_name='Bash', skill='x'), ev('PreToolUse', skill='x'), ev('Stop', tool_name='Skill', skill='x')):
+            clean = normalize_event('codex', other)
+            self.assertNotIn('skill', clean)
+            self.assertIsNone(live.usage_of(clean))
+        for bad in ('', 'a b', 'a\nb', 'x' * 121, 5, None, ['x'], {'a': 1}):
+            with self.assertRaises(ValueError):
+                normalize_event('codex', {**skill, 'skill': bad})
+            with self.assertRaises(ValueError):
+                normalize_event('codex', ev('Stop', skill=bad))
+        self.state.apply('codex', normalize_event('codex', skill))
+        self.assertNotIn('frontend-design', json.dumps(self.state.snapshot()))
+
+    def test_usage_of_agents(self):
+        self.assertEqual(live.usage_of(normalize_event('claude-code', ev('SubagentStart', agent_id='a1', agent_type='Explore'))), ('agent', 'Explore'))
+        for other in (ev('SubagentStart', agent_id='a1'), ev('SubagentStop', agent_id='a1', agent_type='Explore'), ev('PreToolUse', tool_name='Grep', agent_id='a1', agent_type='Explore'), ev('PostToolUse', tool_name='Skill', agent_type='Explore')):
+            self.assertIsNone(live.usage_of(normalize_event('claude-code', other)))
+
+
 class RegistryTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(live, 'Live module is not implemented')

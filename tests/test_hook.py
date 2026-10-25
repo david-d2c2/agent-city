@@ -96,6 +96,25 @@ class BuildEventTest(unittest.TestCase):
             'agent_id': 'a1', 'agent_type': 'reviewer',
         })
 
+    def test_skill_name_only_for_skill_tool(self):
+        skill = dict(CLAUDE_PAYLOAD, tool_name='Skill', tool_input={'skill': 'plug:frontend-design', 'args': 'SECRET ARGS', 'extra': {'a': 1}})
+        event = hook.build_event(skill)
+        self.assertEqual(event['skill'], 'plug:frontend-design')
+        self.assertNotIn('SECRET', json.dumps(event))
+        self.assertEqual(set(event) - set(hook.EVENT_KEYS), {'skill'})
+        for tool in ('Bash', 'Task', None):
+            self.assertNotIn('skill', hook.build_event(dict(skill, tool_name=tool)))
+        self.assertNotIn('skill', hook.build_event({k: v for k, v in skill.items() if k != 'tool_name'}))
+
+    def test_invalid_skill_values_are_dropped(self):
+        for bad in ('', ' x', 'a b', 'a\nb', 'x' * 121, 'ñ', 'a;b', 5, None, ['x'], {'skill': 'x'}, True):
+            event = hook.build_event(dict(CLAUDE_PAYLOAD, tool_name='Skill', tool_input={'skill': bad}))
+            self.assertNotIn('skill', event, repr(bad))
+        for tool_input in (None, 'skill', ['skill'], 5, {}, {'name': 'x'}, {'Skill': 'x'}):
+            self.assertNotIn('skill', hook.build_event(dict(CLAUDE_PAYLOAD, tool_name='Skill', tool_input=tool_input)))
+        self.assertEqual(hook.build_event(dict(CLAUDE_PAYLOAD, tool_name='Skill', tool_input={'skill': 'x' * 120}))['skill'], 'x' * 120)
+        self.assertEqual(hook.build_event(dict(CLAUDE_PAYLOAD, tool_name='Skill', tool_input={'skill': 'A_b.c:d@e/f+g-1'}))['skill'], 'A_b.c:d@e/f+g-1')
+
     def test_non_object_gives_empty(self):
         for value in ([], 'x', None, 3):
             self.assertEqual(hook.build_event(value), {})
@@ -140,6 +159,15 @@ class PostTest(HookCase):
         for leaked in (b'SECRET PROMPT', b'rm -rf', b'prompt', b'tool_input', b'transcript'):
             self.assertNotIn(leaked, req['body'])
 
+    def test_skill_request_carries_only_the_name(self):
+        server = self.start_server()
+        payload = dict(CLAUDE_PAYLOAD, tool_name='Skill', tool_input={'skill': 'frontend-design', 'args': 'SECRET ARGS'})
+        self.assertEqual(hook.main(['--source', 'claude-code'], json.dumps(payload).encode(), self.env), 0)
+        body = json.loads(server.requests[0]['body'])
+        self.assertEqual(body['event']['skill'], 'frontend-design')
+        for leaked in (b'SECRET', b'tool_input', b'args', b'prompt'):
+            self.assertNotIn(leaked, server.requests[0]['body'])
+
     def test_codex_request_shape(self):
         server = self.start_server()
         hook.main(['--source', 'codex'], json.dumps(CODEX_PAYLOAD).encode(), self.env)
@@ -182,6 +210,15 @@ class SubprocessTest(HookCase):
         proc, _ = self.run_script(['--source', 'claude-code'], json.dumps(CLAUDE_PAYLOAD).encode())
         self.assert_silent_ok(proc)
         self.assertEqual(len(server.requests), 1)
+
+    def test_skill_event_still_silent_and_exit_zero(self):
+        server = self.start_server()
+        payload = dict(CLAUDE_PAYLOAD, tool_name='Skill', tool_input={'skill': 'frontend-design'})
+        proc, _ = self.run_script(['--source', 'claude-code'], json.dumps(payload).encode())
+        self.assert_silent_ok(proc)
+        self.assertEqual(json.loads(server.requests[0]['body'])['event']['skill'], 'frontend-design')
+        for bad in (b'{"tool_name":"Skill","tool_input":{"skill":5}}', b'{"tool_name":"Skill","tool_input":"x"}'):
+            self.assert_silent_ok(self.run_script(['--source', 'claude-code'], bad)[0])
 
     def test_unauthorized_response(self):
         server = self.start_server(status=401)

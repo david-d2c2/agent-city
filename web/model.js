@@ -583,7 +583,7 @@ export const GUIDE_STEPS = [
     body: [
       "Con Claude Code y Codex, la ciudad puede iluminar el edificio de lo que está trabajando ahora mismo.",
       "Se activa con «Conectar hooks»: copias un fragmento de configuración y lo pegas tú. La ciudad nunca toca tus archivos.",
-      "Solo se envía el tipo de evento, la carpeta, la herramienta y el nombre del agente, nunca tus conversaciones. Si la ciudad está cerrada no pasa nada.",
+      "Solo se envía el tipo de evento, la carpeta, la herramienta, el nombre del agente y, cuando usas una skill, el nombre de esa skill; nunca tus conversaciones. Si la ciudad está cerrada no pasa nada.",
     ],
     actions: [{ label: "Conectar hooks", action: "hooks" }],
   },
@@ -604,3 +604,89 @@ export const GUIDE_STEPS = [
     ],
   },
 ];
+
+// ---- Real usage (pure). Names are matched to catalog groups as recorded by Claude Code; absence is never «no se usa». ----
+const USAGE_KINDS = { agent: "role", skill: "skill" };
+const count = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.floor(Number(v)) : 0);
+// groups: groupItems() output. usageItems: GET /api/usage items. A recorded name matches the group with the same
+// normalized key (kind + name); if none and it looks like «plugin:name», the part after the LAST colon is tried.
+// Several recorded names landing in one group are summed. byKey: groupKey -> {total,last7,last30,lastAt,names}.
+// Subagents that ship with Claude Code. A bare recorded name equal to one of these is the built-in, not an installed
+// agent that merely shares its name in another case (e.g. a plugin agent «explore» vs the built-in «Explore»).
+export const BUILTIN_AGENTS = new Set(["Explore", "Plan", "general-purpose", "statusline-setup", "claude-code-guide"]);
+export function matchUsage(groups, usageItems) {
+  const byGroup = new Map((groups ?? []).map((g) => [g?.key, g]));
+  const keys = new Set(byGroup.keys());
+  const byKey = new Map(),
+    unmatched = [];
+  for (const u of Array.isArray(usageItems) ? usageItems : []) {
+    const kind = USAGE_KINDS[u?.kind],
+      name = String(u?.name ?? "");
+    if (!kind || !name.trim()) continue;
+    const tail = name.slice(name.lastIndexOf(":") + 1),
+      exact = groupKey({ kind, name }),
+      suffix = name.includes(":") && tail.trim() ? groupKey({ kind, name: tail }) : null,
+      key = keys.has(exact) ? exact : suffix && keys.has(suffix) ? suffix : null;
+    const builtin =
+      kind === "role" && BUILTIN_AGENTS.has(name) && !byGroup.get(key)?.items?.some((i) => i.name === name);
+    if (!key || builtin) {
+      unmatched.push(u);
+      continue;
+    }
+    const entry = byKey.get(key) ?? { total: 0, last7: 0, last30: 0, lastAt: null, names: [] };
+    entry.total += count(u.total);
+    entry.last7 += count(u.last7);
+    entry.last30 += count(u.last30);
+    if (typeof u.lastAt === "string" && u.lastAt && (!entry.lastAt || u.lastAt > entry.lastAt)) entry.lastAt = u.lastAt;
+    entry.names.push(name);
+    byKey.set(key, entry);
+  }
+  return { byKey, unmatched };
+}
+// Does the loaded usage say anything at all? (items, a recording start, or imported history)
+export const usageHasData = (usage) =>
+  !!usage && (usage.items?.length > 0 || !!usage.since || !!usage.history?.importedAt);
+// First day covered by the record: live recording start or imported history, whichever is earlier.
+export function usageSince(usage) {
+  const days = [usage?.since, usage?.history?.from].filter((d) => typeof d === "string" && d);
+  return days.length ? days.sort()[0] : null;
+}
+// period: "30" (last 30 days) or anything else (everything recorded).
+export const usageCount = (entry, period = "all") => (period === "30" ? count(entry?.last30) : count(entry?.total));
+export function usageState(entry, usage) {
+  const n = count(entry?.total);
+  if (n > 0)
+    return {
+      used: true,
+      label: `Usado ${fmt(n)} ${n === 1 ? "vez" : "veces"}${entry.lastAt ? ` · última vez ${entry.lastAt}` : ""}`,
+    };
+  const since = usageSince(usage);
+  return { used: false, label: since ? `Sin uso registrado desde ${since}` : "Aún no hay registro de uso" };
+}
+// Unique agents/skills (groups) with and without recorded use in the period.
+export function usageSummary(groups, matched, period = "all") {
+  const out = { agents: { used: 0, total: 0 }, skills: { used: 0, total: 0 } };
+  for (const g of groups ?? []) {
+    const bucket = g?.kind === "role" ? out.agents : g?.kind === "skill" ? out.skills : null;
+    if (!bucket) continue;
+    bucket.total += 1;
+    if (usageCount(matched?.byKey?.get(g.key), period) > 0) bucket.used += 1;
+  }
+  return out;
+}
+// Rows ({total,last7,last30,lastAt,name,...}) with use in the period, most used first (ties: latest, then name).
+export const rankUsage = (rows, period = "all") =>
+  (rows ?? [])
+    .filter((r) => usageCount(r, period) > 0)
+    .sort(
+      (a, b) =>
+        usageCount(b, period) - usageCount(a, period) ||
+        String(b.lastAt ?? "").localeCompare(String(a.lastAt ?? "")) ||
+        String(a.name).localeCompare(String(b.name), "es"),
+    );
+export const USAGE_FILTERS = { with: "Con uso registrado", without: "Sin uso registrado" };
+// Group-level filter: "with" keeps groups with recorded use, "without" the rest; any other mode keeps everything.
+export const filterByUsage = (groups, matched, mode) =>
+  Object.hasOwn(USAGE_FILTERS, mode)
+    ? (groups ?? []).filter((g) => (usageCount(matched?.byKey?.get(g.key)) > 0) === (mode === "with"))
+    : (groups ?? []);

@@ -3,18 +3,24 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import re
 import threading
 import time
 
 SOURCES = ('claude-code', 'codex')
 EVENT_KEYS = ('hook_event_name', 'session_id', 'cwd', 'tool_name', 'agent_id', 'agent_type')
+SKILL_NAME = re.compile(r'[A-Za-z0-9_.:@/+-]{1,120}')
 TTL_TOOL, TTL_WORKING, TTL_WAITING, DROP_AFTER, MAX_ENTRIES = 300, 60, 300, 600, 200
 CLAUDE_EVENTS = ('SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'Notification')
 CODEX_EVENTS = ('PreToolUse', 'PostToolUse', 'Stop')
 
 
 def normalize_event(source, event):
-    """Allowlist and validate one hook payload; prompts and tool inputs never get through."""
+    """Allowlist and validate one hook payload; prompts and tool inputs never get through.
+
+    The only extra value is `skill`, the validated name of a Skill call: it is kept
+    solely on PreToolUse events whose tool is Skill.
+    """
     if source not in SOURCES or not isinstance(event, dict):
         raise ValueError('Evento inválido.')
     result = {}
@@ -27,7 +33,21 @@ def normalize_event(source, event):
         result[key] = value
     if not result.get('hook_event_name') or not result.get('session_id'):
         raise ValueError('Faltan campos obligatorios.')
+    if 'skill' in event:
+        if not isinstance(event['skill'], str) or not SKILL_NAME.fullmatch(event['skill']):
+            raise ValueError('Campo de evento inválido.')
+        if result['hook_event_name'] == 'PreToolUse' and result.get('tool_name') == 'Skill':
+            result['skill'] = event['skill']
     return result
+
+
+def usage_of(event):
+    """Return (kind, name) when a normalized event is a real agent or skill call, else None."""
+    if event.get('hook_event_name') == 'SubagentStart' and event.get('agent_type'):
+        return 'agent', event['agent_type']
+    if event.get('hook_event_name') == 'PreToolUse' and event.get('skill'):
+        return 'skill', event['skill']
+    return None
 
 
 def _iso(moment):

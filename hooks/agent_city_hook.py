@@ -3,24 +3,35 @@
 
 Run by Claude Code or Codex as a command hook. Stdlib only. It prints nothing
 and always exits 0 so it can never block or break the calling tool.
+The only value ever read from tool_input is the name of a Skill call
+(tool_name == "Skill"), and only when it matches SKILL_NAME; every other
+tool_input field, prompt, output and transcript path is dropped.
 NEVER probe pids here: os.kill(pid, 0) terminates the process on Windows.
 """
 import http.client
 import json
 import os
+import re
 import sys
 
 SOURCES = ('claude-code', 'codex')
 EVENT_KEYS = ('hook_event_name', 'session_id', 'cwd', 'tool_name', 'agent_id', 'agent_type')
+SKILL_NAME = re.compile(r'[A-Za-z0-9_.:@/+-]{1,120}')
 MAX_STDIN = 1024 * 1024
 TIMEOUT = 0.4
 
 
 def build_event(data):
-    """Keep only allowlisted string fields; prompts and tool payloads never pass."""
+    """Keep only allowlisted string fields plus a validated Skill name; prompts and tool payloads never pass."""
     if not isinstance(data, dict):
         return {}
-    return {k: data[k] for k in EVENT_KEYS if isinstance(data.get(k), str)}
+    event = {k: data[k] for k in EVENT_KEYS if isinstance(data.get(k), str)}
+    tool_input = data.get('tool_input')
+    if data.get('tool_name') == 'Skill' and isinstance(tool_input, dict):
+        skill = tool_input.get('skill')
+        if isinstance(skill, str) and SKILL_NAME.fullmatch(skill):
+            event['skill'] = skill
+    return event
 
 
 def find_registry(env):

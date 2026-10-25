@@ -854,3 +854,163 @@ test("applyProposal only expands selected groups and skips copies already placed
   assert.equal(organization.assignments.length, 1);
   assert.deepEqual(model.applyProposal(organization, proposal, ["b2"]).assignments, organization.assignments);
 });
+
+// ---- Real usage matching ----
+const skillItem = (id, name, extra = {}) => copy(id, name, { kind: "skill", ...extra });
+const use = (kind, name, total, extra = {}) => ({ kind, name, total, last7: 0, last30: total, lastAt: "2026-10-01", ...extra });
+const usageGroups = () =>
+  model.groupItems([
+    copy("a1", "Frontend Developer"), claudeCopy("a2", "frontend-developer"), claudeCopy("a3", "executor"),
+    skillItem("s1", "frontend-design"), skillItem("s2", "Handoff Save"), skillItem("s3", "executor"),
+  ]);
+
+test("matchUsage matches by normalized key: case, accents and separators", () => {
+  const groups = model.groupItems([copy("1", "UX Researcher"), skillItem("2", "Diseño Rápido")]);
+  const { byKey, unmatched } = model.matchUsage(groups, [use("agent", "ux_researcher", 3), use("skill", "DISENO-rapido", 2)]);
+  assert.equal(byKey.get("role:ux researcher").total, 3);
+  assert.equal(byKey.get("skill:diseno rapido").total, 2);
+  assert.deepEqual(unmatched, []);
+});
+
+test("matchUsage never credits a built-in Claude Code subagent to an installed agent that only shares its name", () => {
+  const groups = model.groupItems([claudeCopy("p1", "explore"), claudeCopy("p2", "Plan"), claudeCopy("p3", "executor")]);
+  const { byKey, unmatched } = model.matchUsage(groups, [
+    use("agent", "Explore", 9),
+    use("agent", "general-purpose", 5),
+    use("agent", "oh-my-claudecode:explore", 2),
+    use("agent", "Plan", 1),
+    use("agent", "executor", 3),
+  ]);
+  assert.deepEqual(unmatched.map((u) => u.name), ["Explore", "general-purpose"]);
+  assert.equal(byKey.get("role:explore").total, 2);
+  assert.equal(byKey.get("role:plan").total, 1);
+  assert.equal(byKey.get("role:executor").total, 3);
+});
+
+test("matchUsage keeps kinds apart: an agent name never lights a skill and vice versa", () => {
+  const groups = usageGroups();
+  const { byKey, unmatched } = model.matchUsage(groups, [use("agent", "frontend-design", 4), use("skill", "frontend developer", 5)]);
+  assert.equal(byKey.size, 0);
+  assert.equal(unmatched.length, 2);
+  const only = model.matchUsage(groups, [use("skill", "executor", 7)]);
+  assert.deepEqual([...only.byKey.keys()], ["skill:executor"]);
+});
+
+test("matchUsage falls back to the part after the last colon and the exact name wins", () => {
+  const groups = usageGroups();
+  const suffix = model.matchUsage(groups, [use("agent", "oh-my-claudecode:executor", 2), use("skill", "context-handoff:handoff-save", 1)]);
+  assert.equal(suffix.byKey.get("role:executor").total, 2);
+  assert.equal(suffix.byKey.get("skill:handoff save").total, 1);
+  assert.deepEqual(suffix.byKey.get("role:executor").names, ["oh-my-claudecode:executor"]);
+  const colon = model.groupItems([skillItem("1", "plugin:skill"), skillItem("2", "skill")]);
+  const exact = model.matchUsage(colon, [use("skill", "plugin:skill", 9)]);
+  assert.deepEqual([...exact.byKey.keys()], ["skill:plugin skill"]);
+  const deep = model.matchUsage(model.groupItems([skillItem("1", "c")]), [use("skill", "a:b:c", 1)]);
+  assert.equal(deep.byKey.get("skill:c").total, 1);
+  assert.equal(model.matchUsage(model.groupItems([skillItem("1", "a")]), [use("skill", "a:b:c", 1)]).unmatched.length, 1);
+});
+
+test("matchUsage sums several recorded names of one group and keeps the latest day", () => {
+  const groups = usageGroups();
+  const { byKey } = model.matchUsage(groups, [
+    use("agent", "executor", 3, { last7: 1, last30: 2, lastAt: "2026-10-03" }),
+    use("agent", "oh-my-claudecode:executor", 4, { last7: 2, last30: 4, lastAt: "2026-10-20" }),
+    use("agent", "other:executor", 1, { last7: 0, last30: 1, lastAt: "2026-09-01" }),
+  ]);
+  assert.deepEqual(byKey.get("role:executor"), {
+    total: 8, last7: 3, last30: 7, lastAt: "2026-10-20",
+    names: ["executor", "oh-my-claudecode:executor", "other:executor"],
+  });
+});
+
+test("matchUsage lists built-ins and anything missing from the catalog as unmatched", () => {
+  const groups = usageGroups();
+  const explore = use("agent", "Explore", 12);
+  const general = use("agent", "general-purpose", 5);
+  const { byKey, unmatched } = model.matchUsage(groups, [explore, use("agent", "frontend-developer", 1), general, use("skill", "nope", 2)]);
+  assert.deepEqual(unmatched.map((u) => u.name), ["Explore", "general-purpose", "nope"]);
+  assert.equal(unmatched[0], explore);
+  assert.equal(byKey.get("role:frontend developer").total, 1);
+});
+
+test("matchUsage tolerates empty, null and malformed input", () => {
+  assert.equal(model.matchUsage(null, null).byKey.size, 0);
+  assert.deepEqual(model.matchUsage([], undefined).unmatched, []);
+  const groups = usageGroups();
+  const odd = model.matchUsage(groups, [null, {}, { kind: "agent" }, { kind: "tool", name: "x" }, { kind: "agent", name: "  " }, { kind: "agent", name: "plugin:" }, use("agent", "executor", "x")]);
+  assert.equal(odd.byKey.get("role:executor").total, 0);
+  assert.equal(odd.unmatched.length, 1);
+  assert.deepEqual(model.matchUsage(groups, []).unmatched, []);
+});
+
+test("usageState words never say that something is not used and always carry the recording start", () => {
+  const meta = { since: "2026-10-25", history: null };
+  const used = model.usageState({ total: 3, lastAt: "2026-10-21" }, meta);
+  assert.equal(used.used, true);
+  assert.equal(used.label, "Usado 3 veces · última vez 2026-10-21");
+  assert.equal(model.usageState({ total: 1 }, meta).label, "Usado 1 vez");
+  assert.equal(model.usageState({ total: 1500, lastAt: "2026-10-21" }, meta).label, "Usado 1.500 veces · última vez 2026-10-21");
+  const none = model.usageState(undefined, meta);
+  assert.equal(none.used, false);
+  assert.equal(none.label, "Sin uso registrado desde 2026-10-25");
+  assert.equal(model.usageState({ total: 0 }, meta).label, none.label);
+  for (const m of [meta, null, {}, { since: null }]) {
+    assert.doesNotMatch(model.usageState(undefined, m).label, /no se usa/i);
+    assert.doesNotMatch(model.usageState({ total: 2, lastAt: "2026-10-21" }, m).label, /no se usa/i);
+  }
+  assert.equal(model.usageState(undefined, null).label, "Aún no hay registro de uso");
+  assert.equal(model.usageState(undefined, { since: null }).label, "Aún no hay registro de uso");
+});
+
+test("usageSince covers imported history when it starts earlier than the live recording", () => {
+  assert.equal(model.usageSince({ since: "2026-10-25", history: { from: "2026-04-26" } }), "2026-04-26");
+  assert.equal(model.usageSince({ since: "2026-10-25", history: { from: null } }), "2026-10-25");
+  assert.equal(model.usageSince({ since: null, history: { from: "2026-04-26" } }), "2026-04-26");
+  assert.equal(model.usageSince(null), null);
+  assert.equal(model.usageState(undefined, { since: "2026-10-25", history: { from: "2026-04-26" } }).label, "Sin uso registrado desde 2026-04-26");
+});
+
+test("usageHasData is false for an empty record and true for items, a start day or imported history", () => {
+  assert.equal(model.usageHasData(null), false);
+  assert.equal(model.usageHasData({ since: null, history: { importedAt: null }, items: [] }), false);
+  assert.equal(model.usageHasData({ since: "2026-10-25", items: [] }), true);
+  assert.equal(model.usageHasData({ items: [use("agent", "x", 1)] }), true);
+  assert.equal(model.usageHasData({ items: [], history: { importedAt: "2026-10-25" } }), true);
+});
+
+test("usageSummary counts unique groups with and without recorded use, per period", () => {
+  const groups = usageGroups();
+  const matched = model.matchUsage(groups, [
+    use("agent", "executor", 4, { last30: 0 }), use("agent", "frontend developer", 1),
+    use("skill", "frontend-design", 2), use("agent", "Explore", 9),
+  ]);
+  assert.deepEqual(model.usageSummary(groups, matched), { agents: { used: 2, total: 2 }, skills: { used: 1, total: 3 } });
+  assert.deepEqual(model.usageSummary(groups, matched, "30"), { agents: { used: 1, total: 2 }, skills: { used: 1, total: 3 } });
+  assert.deepEqual(model.usageSummary(groups, null), { agents: { used: 0, total: 2 }, skills: { used: 0, total: 3 } });
+  assert.deepEqual(model.usageSummary(null, matched), { agents: { used: 0, total: 0 }, skills: { used: 0, total: 0 } });
+});
+
+test("rankUsage orders by count in the period, then latest day, then name, and drops zeros", () => {
+  const rows = [
+    { name: "b", total: 5, last30: 0, lastAt: "2026-01-01" },
+    { name: "c", total: 5, last30: 2, lastAt: "2026-03-01" },
+    { name: "a", total: 5, last30: 2, lastAt: "2026-03-01" },
+    { name: "d", total: 9, last30: 1, lastAt: "2026-02-01" },
+    { name: "z", total: 0, last30: 0 },
+  ];
+  assert.deepEqual(model.rankUsage(rows).map((r) => r.name), ["d", "a", "c", "b"]);
+  assert.deepEqual(model.rankUsage(rows, "30").map((r) => r.name), ["a", "c", "d"]);
+  assert.deepEqual(model.rankUsage(null), []);
+});
+
+test("filterByUsage is group-level and any unknown mode keeps everything", () => {
+  const groups = usageGroups();
+  const matched = model.matchUsage(groups, [use("agent", "executor", 4), use("skill", "frontend-design", 1)]);
+  const names = (mode) => model.filterByUsage(groups, matched, mode).map((g) => g.key);
+  assert.deepEqual(names("with"), ["role:executor", "skill:frontend design"]);
+  assert.equal(names("without").length, groups.length - 2);
+  assert.equal(names("").length, groups.length);
+  assert.equal(names(undefined).length, groups.length);
+  assert.equal(names("toString").length, groups.length);
+  assert.equal(model.filterByUsage(groups, null, "with").length, 0);
+});

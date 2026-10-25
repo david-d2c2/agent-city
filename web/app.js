@@ -1,19 +1,23 @@
 import {
   GUIDE_STEPS,
   TRUTH_TIERS,
+  USAGE_FILTERS,
   addProjectsFromFolders,
   applyProposal,
   buildingRoles,
   elapsedLabel,
+  filterByUsage,
   filterCatalog,
   groupItems,
   groupKey,
   liveMapping,
+  matchUsage,
   originLabel,
   projectLookup,
   projectSpaces,
   projectsForSpace,
   proposeOrganization,
+  rankUsage,
   resultsLabel,
   roleCapabilities,
   roleCountLabel,
@@ -25,6 +29,11 @@ import {
   sourceLabel,
   stateLabel,
   unitLabel,
+  usageCount,
+  usageHasData,
+  usageSince,
+  usageState,
+  usageSummary,
 } from "./model.js";
 import { applyLive, renderCity } from "./scene.js";
 import { renderCity3D, webglAvailable } from "./city3d.js";
@@ -73,7 +82,25 @@ const savePrefs = () => {
   } catch {}
 };
 const org = () => data.organization;
-const visible = () => filterCatalog(data.catalog, org(), prefs.filters);
+// Real usage (GET /api/usage). null = not loaded or unavailable: the UI says so instead of guessing.
+let usage = null,
+  usageMemo = null;
+// Usage is matched against the groups of the WHOLE catalog (memoized), so filtering the view never turns used items into «unmatched».
+const usageMatched = () => {
+  if (usageMemo?.catalog !== data.catalog || usageMemo.usage !== usage) {
+    const groups = groupItems(data.catalog);
+    usageMemo = { catalog: data.catalog, usage, groups, matched: matchUsage(groups, usage?.items) };
+  }
+  return usageMemo;
+};
+const usageMode = () => (Object.hasOwn(USAGE_FILTERS, prefs.filters.usage) ? prefs.filters.usage : "");
+// Group-level usage filter, applied after the plain filters; ignored (and explained) while there is no usage record.
+const visible = () => {
+  const items = filterCatalog(data.catalog, org(), prefs.filters);
+  return usageMode() && usageHasData(usage)
+    ? filterByUsage(groupItems(items), usageMatched().matched, usageMode()).flatMap((g) => g.items)
+    : items;
+};
 // Copies of the same agent/skill are grouped in the browser only; every copy keeps its own id, assignments and links.
 const grouping = () => prefs.group !== false;
 const rootLabels = () => Object.fromEntries(data.roots.map((r) => [r.id, r.label]));
@@ -922,6 +949,7 @@ function itemRow(group) {
       ),
       el("strong", {}, item.name),
       copyBadge(group),
+      usageChip(group.key),
       item.kind === "role"
         ? el("span", { class: "live-slot", "data-live-role": group.items.map((i) => i.id).join(" ") })
         : null,
@@ -1480,6 +1508,8 @@ function detail() {
     );
   const copies = copiesSection(item);
   if (copies) container.append(copies);
+  const usageBox = usageSection(item);
+  if (usageBox) container.append(usageBox);
   container.append(capabilities(item));
   if (item.kind === "role") {
     container.append(
@@ -1580,7 +1610,7 @@ function renderContent() {
     if (v)
       chips.append(
         button(
-          `${{ query: "Buscar", kind: "Tipo", space: "Edificio", project: "Proyecto", specialty: "Especialidad" }[k]}: ${org().spaces.find((s) => s.id === v)?.name || org().projects.find((p) => p.id === v)?.name || v} ×`,
+          `${{ query: "Buscar", kind: "Tipo", space: "Edificio", project: "Proyecto", specialty: "Especialidad", usage: "Uso" }[k]}: ${org().spaces.find((s) => s.id === v)?.name || org().projects.find((p) => p.id === v)?.name || USAGE_FILTERS[v] || v} ×`,
           () => {
             delete prefs.filters[k];
             savePrefs();
@@ -1589,6 +1619,15 @@ function renderContent() {
           "filter-chip",
         ),
       );
+  const mode = usageMode(),
+    usageNote = document.querySelector("#usage-note");
+  usageNote.textContent = !mode
+    ? ""
+    : !usageHasData(usage)
+      ? "El filtro de uso no se aplica: todavía no hay registro de uso. Se rellena con los hooks de Claude Code o importando tu historial desde «Uso»."
+      : mode === "with"
+        ? `Solo lo que consta como usado desde ${usageSince(usage)}.`
+        : `Sin uso registrado desde ${usageSince(usage)}: no consta que se haya usado en ese tiempo, lo que no equivale a que no se use.`;
   const stage = document.querySelector("#stage");
   city?.dispose?.();
   city = undefined;
@@ -1924,9 +1963,10 @@ function render() {
         .sort()
         .map((s) => ({ id: s, name: s })),
     ],
+    ["usage", "Uso: todos", Object.entries(USAGE_FILTERS).map(([id, name]) => ({ id, name }))],
   ]) {
     const control = select(key, options, prefs.filters[key] || "", label);
-    control.setAttribute("aria-label", label);
+    control.setAttribute("aria-label", key === "usage" ? "Uso" : label);
     control.addEventListener("change", () => {
       prefs.filters[key] = control.value;
       savePrefs();
@@ -1976,6 +2016,7 @@ function render() {
           "button quiet",
         ),
         button("Empezar aquí", guideDialog, "button"),
+        button("Uso", usageDialog, "button"),
         button("Conectar fuentes", sourceDialog, "button primary"),
       ),
     ),
@@ -2003,6 +2044,7 @@ function render() {
         ),
         filters,
         el("div", { id: "active-filters", class: "active-filters" }),
+        el("p", { id: "usage-note", class: "hint usage-filter-note", role: "status" }),
         el(
           "div",
           { class: "results-line" },
@@ -2302,11 +2344,315 @@ function startLivePolling() {
   });
   pollLive();
 }
+// ---- Real usage: loading, list chip, detail section, dialog ----
+const plural = (n, one, many) => (n === 1 ? one : many);
+const times = (n) => `${n} ${plural(n, "vez", "veces")}`;
+// Any failure means «sin datos» (usage = null), never a broken app. Returns true when it loaded.
+async function loadUsage() {
+  try {
+    usage = await api("/api/usage");
+    return true;
+  } catch {
+    usage = null;
+    return false;
+  }
+}
+// Re-render only what shows usage, so a late answer never rebuilds the city for nothing.
+const usageViewsChanged = () => {
+  if (prefs.filters.usage || prefs.selected || prefs.view === "list") renderContent();
+};
+const usageChip = (key) => {
+  const entry = usageMatched().matched.byKey.get(key);
+  return entry?.total > 0
+    ? el("span", { class: "usage-chip", title: usageState(entry, usage).label }, `usado ${entry.total}×`)
+    : null;
+};
+function usageSection(item) {
+  const key = groupKey(item);
+  if (key.startsWith("id:")) return null;
+  const box = el("section", { class: "usage", "aria-label": "Uso" }, el("h3", {}, "Uso"));
+  if (!usageHasData(usage)) {
+    box.append(
+      el(
+        "p",
+        { class: "hint" },
+        usage
+          ? "Aún no hay registro de uso. Se rellena con los hooks de Claude Code o importando tu historial desde «Uso»."
+          : "Los datos de uso no están disponibles ahora mismo.",
+      ),
+    );
+    return box;
+  }
+  const { matched, groups } = usageMatched(),
+    entry = matched.byKey.get(key),
+    state = usageState(entry, usage),
+    copies = groups.find((g) => g.key === key)?.count ?? 1;
+  box.append(el("p", { class: "usage-state", "data-used": String(state.used) }, state.label));
+  if (state.used)
+    box.append(
+      el("p", {}, `Últimos 30 días: ${times(entry.last30)} · Últimos 7 días: ${times(entry.last7)}`),
+      ...(entry.names.some((n) => groupKey({ kind: item.kind, name: n }) !== key)
+        ? [el("p", { class: "hint" }, `Registrado como: ${entry.names.join(", ")}`)]
+        : []), // Node.append turns null into the text "null"
+    );
+  box.append(
+    el(
+      "p",
+      { class: "hint" },
+      `${copies > 1 ? `Describe las ${copies} copias juntas: el registro es por nombre. ` : ""}Solo cuenta lo que ven los hooks de Claude Code o el historial importado; «sin uso registrado» no significa que no se use.`,
+    ),
+  );
+  return box;
+}
+
+const usageUi = { period: "all", step: null, busy: false };
+function usageDialog() {
+  const ui = usageUi;
+  ui.step = null;
+  const holder = el("div", { class: "usage-main" });
+  const note = el("p", { class: "hint usage-note", role: "status" });
+  const error = el("p", { class: "form-error", role: "alert" });
+  const ranking = (title, kind) => {
+    const { matched, groups } = usageMatched(),
+      rows = rankUsage(
+        groups
+          .filter((g) => g.kind === kind && matched.byKey.has(g.key))
+          .map((g) => ({ ...matched.byKey.get(g.key), name: g.name, group: g })),
+        ui.period,
+      ).slice(0, 10);
+    return el(
+      "section",
+      { class: "usage-list" },
+      el("h3", {}, title),
+      rows.length
+        ? el(
+            "ol",
+            {},
+            ...rows.map((r) =>
+              el(
+                "li",
+                {},
+                button(r.name, () => selectItem(r.group.primary.id), "text-button"),
+                el("span", { class: "usage-meta" }, `${times(usageCount(r, ui.period))} · última vez ${r.lastAt ?? "—"}`),
+              ),
+            ),
+          )
+        : el("p", { class: "hint" }, "Ninguno con uso registrado en este periodo."),
+    );
+  };
+  const show = (kids, focus) => {
+    holder.replaceChildren(...kids.filter(Boolean));
+    if (focus) holder.querySelector(focus)?.focus();
+  };
+  const draw = (focus) => {
+    const kids = [
+      el(
+        "p",
+        {},
+        "Cuenta los lanzamientos de subagentes y las llamadas a skills que ven los hooks de Claude Code. No cuenta los slash commands que escribes tú, ni Codex, ni nada anterior a la fecha de inicio del registro, salvo que importes tu historial de Claude Code.",
+      ),
+    ];
+    if (!usage) {
+      const retry = button(
+        "Reintentar",
+        async () => {
+          await loadUsage();
+          usageViewsChanged();
+          draw("[data-act=retry]");
+        },
+        "button primary",
+      );
+      retry.dataset.act = "retry";
+      return show(
+        [
+          ...kids,
+          el("p", { class: "notice" }, "No se pudieron cargar los datos de uso. Comprueba que la ciudad está actualizada y vuelve a intentarlo."),
+          retry,
+        ],
+        focus,
+      );
+    }
+    const since = usageSince(usage),
+      hist = usage.history?.importedAt ? usage.history : null;
+    kids.push(
+      el(
+        "p",
+        { class: "usage-coverage" },
+        since ? `Registro desde ${since}.` : "Aún no hay registro de uso.",
+        usage.liveSince && usage.liveSince !== since ? ` Hooks en vivo desde ${usage.liveSince}.` : "",
+        hist
+          ? ` Historial de Claude Code importado${hist.from ? ` (${hist.from} – ${hist.to ?? "…"})` : ""}.`
+          : " Historial de Claude Code sin importar.",
+      ),
+    );
+    if (usage.skillTracking === false)
+      kids.push(
+        el(
+          "p",
+          { class: "notice" },
+          "El hook instalado aún no envía el nombre de las skills; actualiza la copia del hook para registrarlas. Los agentes se registran con normalidad.",
+        ),
+      );
+    const { matched, groups } = usageMatched(),
+      sum = usageSummary(groups, matched, ui.period),
+      unmatched = rankUsage(matched.unmatched, ui.period),
+      period = el("div", { class: "view-toggle usage-period", role: "group", "aria-label": "Periodo" });
+    for (const [key, label] of [
+      ["30", "Últimos 30 días"],
+      ["all", "Todo"],
+    ]) {
+      const b = button(label, () => ((ui.period = key), draw(`[data-period="${key}"]`)), "button");
+      b.dataset.period = key;
+      b.setAttribute("aria-pressed", String(ui.period === key));
+      period.append(b);
+    }
+    kids.push(
+      period,
+      el(
+        "p",
+        { class: "usage-summary" },
+        el("strong", {}, `${sum.agents.used} de ${sum.agents.total} ${plural(sum.agents.total, "agente único", "agentes únicos")}`),
+        ` con uso registrado${ui.period === "30" ? " en los últimos 30 días" : ""} · `,
+        el("strong", {}, `${sum.skills.used} de ${sum.skills.total} ${unitLabel("skill", sum.skills.total, true)}`),
+        ".",
+      ),
+      el(
+        "p",
+        { class: "hint" },
+        "«Sin uso registrado» no es lo mismo que «no se usa»: solo consta lo que han visto los hooks o el historial importado.",
+      ),
+      ranking("Agentes más usados", "role"),
+      ranking("Skills más usadas", "skill"),
+    );
+    if (unmatched.length)
+      kids.push(
+        el(
+          "details",
+          { class: "usage-unmatched" },
+          el("summary", {}, `Usados sin definición en el catálogo (${unmatched.length})`),
+          el(
+            "p",
+            { class: "hint" },
+            "Nombres con uso registrado que no coinciden con ninguna definición conectada: por ejemplo agentes integrados de Claude Code (Explore) o skills de carpetas que no has conectado.",
+          ),
+          el(
+            "ol",
+            {},
+            ...unmatched.slice(0, 50).map((u) =>
+              el(
+                "li",
+                {},
+                el("span", { class: "mono" }, u.name),
+                el(
+                  "span",
+                  { class: "usage-meta" },
+                  `${u.kind === "skill" ? "skill" : "agente"} · ${times(usageCount(u, ui.period))} · última vez ${u.lastAt ?? "—"}`,
+                ),
+              ),
+            ),
+          ),
+          unmatched.length > 50 ? el("p", { class: "hint" }, `+${unmatched.length - 50} más`) : null,
+        ),
+      );
+    const confirm = (text, label, go, back) =>
+      el(
+        "div",
+        { class: "usage-confirm", role: "group", "aria-label": "Confirmación", tabindex: "-1" },
+        el("p", {}, text),
+        el(
+          "div",
+          { class: "guide-actions" },
+          button(label, go, "button primary"),
+          button(
+            "Cancelar",
+            () => {
+              ui.step = null;
+              draw(`[data-act=${back}]`);
+            },
+            "button quiet",
+          ),
+        ),
+      );
+    const act = (label, step, cls) => {
+      const b = button(
+        label,
+        () => {
+          ui.step = step;
+          note.textContent = error.textContent = "";
+          draw(".usage-confirm");
+        },
+        cls,
+      );
+      b.dataset.act = step;
+      b.disabled = ui.busy;
+      return b;
+    };
+    kids.push(
+      ui.step === "import"
+        ? confirm(
+            "Se leerán los archivos de conversación de Claude Code de esta carpeta solo para contar llamadas a skills y a subagentes. No se guarda ni se muestra nada más.",
+            "Confirmar",
+            () =>
+              run("/api/usage/import-history", "Leyendo el historial… puede tardar unos segundos.", (r) => {
+                const i = r.imported ?? {};
+                return `Historial importado: ${countOf(i.agent ?? 0, "lanzamiento", "lanzamientos")} de agentes y ${countOf(i.skill ?? 0, "llamada", "llamadas")} a skills, en ${countOf(i.files ?? 0, "archivo leído", "archivos leídos")}${i.skipped ? ` (${i.skipped} omitidos)` : ""}${i.from ? `, del ${i.from} al ${i.to ?? "…"}` : ""}.`;
+              }),
+            "import",
+          )
+        : ui.step === "clear"
+          ? confirm(
+              "Se borrarán los contadores de uso que guarda Agent City. No se toca ninguna conversación ni archivo de Claude Code, y el registro empezará de nuevo.",
+              "Confirmar y borrar",
+              () => run("/api/usage/clear", "Borrando…", () => "Registro de uso borrado."),
+              "clear",
+            )
+          : el(
+              "div",
+              { class: "guide-actions" },
+              act("Importar historial de Claude Code", "import", "button primary"),
+              act("Borrar registro de uso", "clear", "button quiet"),
+            ),
+    );
+    show(kids, focus);
+  };
+  async function run(path, working, done) {
+    if (ui.busy) return;
+    ui.busy = true;
+    document.body.classList.add("busy");
+    note.textContent = working;
+    error.textContent = "";
+    try {
+      const result = await api(path, {});
+      usage = result.usage ?? result;
+      note.textContent = done(result);
+      usageViewsChanged();
+    } catch (e) {
+      note.textContent = "";
+      error.textContent = e.message;
+    } finally {
+      ui.busy = false;
+      ui.step = null;
+      document.body.classList.remove("busy");
+      if (dialog?.isConnected && dialog.dataset.kind === "usage") draw("[data-act=import]");
+    }
+  }
+  const d = showDialog("Uso real", el("div", { class: "dialog-body" }, holder, note, error));
+  d.classList.add("live-dialog", "usage-dialog");
+  d.dataset.kind = "usage";
+  const eyebrow = d.querySelector(".eyebrow");
+  if (eyebrow) eyebrow.textContent = "REGISTRO LOCAL";
+  draw();
+}
 async function bootstrap() {
   try {
+    const usageLoad = loadUsage(); // in parallel and never rejects: a failure only means «sin datos»
     data = await api("/api/bootstrap");
+    const rendered = usage;
     render();
     startLivePolling();
+    usageLoad.then(() => {
+      if (usage !== rendered) usageViewsChanged();
+    });
     if (!data.roots?.length && !guideSeen()) guideDialog();
   } catch (error) {
     app.replaceChildren(
