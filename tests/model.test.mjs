@@ -1014,3 +1014,146 @@ test("filterByUsage is group-level and any unknown mode keeps everything", () =>
   assert.equal(names("toString").length, groups.length);
   assert.equal(model.filterByUsage(groups, null, "with").length, 0);
 });
+
+// ---- City scale: distinct agents per building and per project ----
+const scaleCatalog = [
+  { id: "c1", kind: "role", name: "UX Researcher", validity: "valid" },
+  { id: "c2", kind: "role", name: "ux-researcher", validity: "valid" },
+  { id: "c3", kind: "role", name: "Planner", validity: "valid" },
+  { id: "c4", kind: "role", name: "Writer", validity: "valid" },
+  { id: "s1", kind: "skill", name: "Planner", validity: "valid" },
+];
+const scaleOrg = {
+  spaces: [{ id: "office" }, { id: "home" }, { id: "lib" }],
+  projects: [
+    { id: "pa", name: "A", spaceIds: ["office"] },
+    { id: "pb", name: "B", spaceIds: ["home"] },
+    { id: "pc", name: "C", spaceIds: ["office"] },
+  ],
+  assignments: [
+    { roleId: "c1", spaceId: "lib" },
+    { roleId: "c2", spaceId: "lib" }, // copy of c1: one unique agent
+    { roleId: "c3", spaceId: "lib" },
+    { roleId: "c4", projectId: "pa" },
+    { roleId: "c1", projectId: "pa" },
+    { roleId: "ghost", projectId: "pa" }, // not in the catalog: ignored
+  ],
+};
+
+test("uniqueAgentsBySpace counts groups, not copies, and includes project assignments", () => {
+  const n = model.uniqueAgentsBySpace(scaleOrg, scaleCatalog);
+  assert.equal(n.lib, 2);
+  assert.equal(n.office, 2); // c4 and c1 via project pa
+  assert.equal(n.home, 0);
+  assert.deepEqual(model.uniqueAgentsBySpace(null, undefined), {});
+});
+
+test("projectAgentStats = assigned groups union used groups, built-ins never count", () => {
+  const rows = [
+    { projectId: "pa", kind: "agent", name: "Planner", total: 3, last7: 1, last30: 3, lastAt: "2026-05-01" },
+    { projectId: "pa", kind: "agent", name: "UX-Researcher", total: 1, last7: 0, last30: 1, lastAt: "2026-04-01" },
+    { projectId: "pa", kind: "agent", name: "Explore", total: 9, last7: 9, last30: 9, lastAt: "2026-05-03" },
+    { projectId: "pa", kind: "skill", name: "Planner", total: 2, last7: 0, last30: 0, lastAt: "2026-05-09" },
+    { projectId: "pb", kind: "agent", name: "plugin:Writer", total: 2, last7: 0, last30: 2, lastAt: "2026-02-02" },
+    { projectId: "pb", kind: "agent", name: "Nobody", total: 5, last7: 0, last30: 0, lastAt: "2026-02-03" },
+    { projectId: "pb", kind: "agent", name: "Planner", total: 0, last7: 0, last30: 0, lastAt: null },
+    { projectId: "nope", kind: "agent", name: "Planner", total: 1 },
+    null,
+  ];
+  const stats = model.projectAgentStats(scaleOrg, scaleCatalog, rows);
+  // pa: assigned {Writer, UX Researcher}, used {Planner, UX Researcher}; Explore is the built-in
+  assert.deepEqual(stats.pa, { agents: 3, assigned: 2, used: 2, lastAt: "2026-05-09" });
+  assert.deepEqual(stats.pb, { agents: 1, assigned: 0, used: 1, lastAt: "2026-02-03" });
+  assert.deepEqual(stats.pc, { agents: 0, assigned: 0, used: 0, lastAt: null });
+  assert.equal(Object.hasOwn(stats, "nope"), false);
+});
+
+test("projectAgentStats tolerates missing usage and an empty organization", () => {
+  for (const rows of [undefined, null, "x", []]) {
+    const stats = model.projectAgentStats(scaleOrg, scaleCatalog, rows);
+    assert.equal(stats.pa.agents, 2);
+    assert.equal(stats.pa.used, 0);
+  }
+  assert.deepEqual(model.projectAgentStats(null, undefined, undefined), {});
+});
+
+test("liveByProject groups active sessions by the project that owns their folder", () => {
+  const org = {
+    projects: [
+      { id: "p1", path: "C:\\Work\\Proj" },
+      { id: "p2", path: "c:/work/proj/deep/" },
+    ],
+  };
+  const live = {
+    sessions: [
+      sess({ cwd: "C:/Work/Proj/src" }),
+      sess({ cwd: "C:/Work/Proj/deep/x", state: "waiting" }),
+      sess({ cwd: "C:/Work/Proj", active: false }),
+      sess({ cwd: "D:/elsewhere" }),
+      sess({ cwd: "" }),
+      null,
+    ],
+  };
+  const out = model.liveByProject(live, org);
+  assert.deepEqual(Object.keys(out).sort(), ["p1", "p2"]);
+  assert.equal(out.p1.count, 1);
+  assert.equal(out.p1.states.working, 1);
+  assert.equal(out.p2.states.waiting, 1);
+  assert.deepEqual(model.liveByProject(null, org), {});
+  assert.deepEqual(model.liveByProject(live, null), {});
+});
+
+// ---- Filtered counts: «X de Y roles» and the two kinds of empty room ----
+test("roleCountOf says X de Y only when the filters hide part of the building", () => {
+  assert.equal(model.roleCountOf(32, 32, false), "32 roles");
+  assert.equal(model.roleCountOf(0, 32, true), "0 de 32 roles");
+  assert.equal(model.roleCountOf(1, 32, true), "1 de 32 roles");
+  assert.equal(model.roleCountOf(32, 32, true), "32 roles");
+  assert.equal(model.roleCountOf(0, 1, true), "0 de 1 rol");
+  assert.equal(model.roleCountOf(0, 1, false), "1 rol");
+  assert.equal(model.roleCountOf(2, 1500, true, true), "2 de 1.500 roles únicos");
+  assert.equal(model.roleCountOf(undefined, undefined, true), "0 roles");
+});
+
+test("emptyRoomKind tells a truly empty building from one hidden by filters", () => {
+  assert.equal(model.emptyRoomKind(0, 0), "empty");
+  assert.equal(model.emptyRoomKind(undefined, 0), "empty");
+  assert.equal(model.emptyRoomKind(32, 0), "filtered");
+  assert.equal(model.emptyRoomKind(32, 5), "none");
+  assert.equal(model.emptyRoomKind(5, 5), "none");
+});
+
+test("active filters are described with the same words as the filter chips", () => {
+  const org = { spaces: [{ id: "s1", name: "Estudio" }], projects: [{ id: "p1", name: "Proyecto-Demo" }] };
+  const filters = { project: "p1", space: "s1", query: "ux", kind: "", usage: "without" };
+  assert.equal(model.hasActiveFilters(filters), true);
+  assert.equal(model.hasActiveFilters({ kind: "", query: undefined }), false);
+  assert.equal(model.hasActiveFilters(undefined), false);
+  assert.deepEqual(model.activeFilterTexts(filters, org), [
+    "Proyecto: Proyecto-Demo",
+    "Edificio: Estudio",
+    "Buscar: ux",
+    "Uso: Sin uso registrado",
+  ]);
+  assert.equal(
+    model.filterNoticeText(["Proyecto: Proyecto-Demo"], 0, 32),
+    "Filtros activos: Proyecto: Proyecto-Demo. Mostrando 0 de 32 roles únicos.",
+  );
+});
+
+test("buildingCounts compares the filtered view with the whole catalog, per unique agent", () => {
+  const catalog = [
+    { id: "a1", kind: "role", name: "Alfa", validity: "valid" },
+    { id: "a2", kind: "role", name: "alfa", validity: "valid" },
+    { id: "b", kind: "role", name: "Beta", validity: "valid" },
+    { id: "s", kind: "skill", name: "Skill", validity: "valid" },
+  ];
+  const ids = new Set(["a1", "a2", "b", "s"]);
+  const all = model.buildingCounts(catalog, catalog, ids, true, false);
+  assert.deepEqual(all, { shown: 2, total: 2, text: "2 roles" });
+  const none = model.buildingCounts(catalog, [], ids, true, true);
+  assert.deepEqual(none, { shown: 0, total: 2, text: "0 de 2 roles" });
+  const some = model.buildingCounts(catalog, [catalog[2]], ids, true, true);
+  assert.equal(some.text, "1 de 2 roles");
+  assert.equal(model.buildingCounts(catalog, [], ids, false, true).text, "0 de 3 roles");
+});

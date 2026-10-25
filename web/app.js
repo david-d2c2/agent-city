@@ -5,11 +5,18 @@ import {
   addProjectsFromFolders,
   applyProposal,
   buildingRoles,
+  activeFilterTexts,
+  buildingCounts,
   elapsedLabel,
+  emptyRoomKind,
   filterByUsage,
+  filterChipText,
+  filterNoticeText,
+  hasActiveFilters,
   filterCatalog,
   groupItems,
   groupKey,
+  liveByProject,
   liveMapping,
   matchUsage,
   originLabel,
@@ -33,7 +40,9 @@ import {
   usageHasData,
   usageSince,
   usageState,
+  uniqueAgentsBySpace,
   usageSummary,
+  projectAgentStats,
 } from "./model.js";
 import { applyLive, renderCity } from "./scene.js";
 import { renderCity3D, webglAvailable } from "./city3d.js";
@@ -93,6 +102,30 @@ const usageMatched = () => {
   }
   return usageMemo;
 };
+// What sizes the city: unique agents per building and per project (assigned OR used there). Memoized on the data it reads.
+let cityAgentsMemo = null,
+  renderedCitySignature = null;
+const cityAgents = () => {
+  if (cityAgentsMemo?.catalog !== data.catalog || cityAgentsMemo.org !== org() || cityAgentsMemo.usage !== usage)
+    cityAgentsMemo = {
+      catalog: data.catalog,
+      org: org(),
+      usage,
+      value: {
+        bySpace: uniqueAgentsBySpace(org(), data.catalog),
+        byProject: projectAgentStats(org(), data.catalog, usage?.projectItems),
+      },
+    };
+  return cityAgentsMemo.value;
+};
+const citySignature = (a) =>
+  JSON.stringify([a.bySpace, Object.entries(a.byProject).map(([id, s]) => [id, s.agents, s.lastAt])]);
+// Same effect as clicking a project in the sidebar: filter everything by it.
+function filterByProject(id) {
+  prefs.filters.project = id;
+  savePrefs();
+  render();
+}
 const usageMode = () => (Object.hasOwn(USAGE_FILTERS, prefs.filters.usage) ? prefs.filters.usage : "");
 // Group-level usage filter, applied after the plain filters; ignored (and explained) while there is no usage record.
 const visible = () => {
@@ -998,6 +1031,21 @@ function openRoom(id) {
       .filter((i) => i.kind === "role" && ids.has(i.id))
       .sort((a, b) => a.name.localeCompare(b.name, "es")),
     roleGroups = groupsOf(items);
+  // What the building holds without any filter, to tell «empty» from «hidden by the filters».
+  const filtersOn = hasActiveFilters(prefs.filters),
+    totalGroups = filtersOn
+      ? groupsOf(data.catalog.filter((i) => i.kind === "role" && ids.has(i.id))).length
+      : roleGroups.length,
+    emptyKind = emptyRoomKind(totalGroups, roleGroups.length),
+    hidden = filtersOn && roleGroups.length < totalGroups,
+    filterTexts = activeFilterTexts(prefs.filters, org()),
+    removeFilters = () => {
+      closeDialog();
+      prefs.filters = {};
+      savePrefs();
+      render();
+      openRoom(id);
+    };
   const skills = visible().filter(
       (i) =>
         i.kind === "skill" &&
@@ -1009,12 +1057,22 @@ function openRoom(id) {
       "span",
       {},
       el("b", {}, String(groups)),
-      ` ${unitLabel(kind, groups, flat > groups)}${suffix}`,
+      kind === "role" && hidden
+        ? ` de ${totalGroups} ${unitLabel(kind, totalGroups, true)}`
+        : ` ${unitLabel(kind, groups, flat > groups)}${suffix}`,
       flat > groups ? ` · ${flat} copias` : "",
     );
   const room = el(
     "div",
     { class: "room-body", "data-type": space.type },
+    hidden
+      ? el(
+          "div",
+          { class: "room-filter-notice", role: "status" },
+          el("p", {}, filterNoticeText(filterTexts, roleGroups.length, totalGroups, true)),
+          button("Quitar filtros", removeFilters, "button quiet"),
+        )
+      : null,
     el(
       "div",
       { class: "room-toolbar" },
@@ -1031,18 +1089,28 @@ function openRoom(id) {
     class: "room-floor",
     "aria-label": "Sala de agentes",
   });
-  if (!roleGroups.length)
+  if (emptyKind === "empty")
     floor.append(
       el(
         "div",
         { class: "room-empty" },
         el("h3", {}, "Aquí comienza algo bueno"),
+        el("p", {}, "Este espacio aún no tiene roles asignados."),
+        button("Asignar un rol", () => chooseRole(id), "button primary"),
+      ),
+    );
+  else if (emptyKind === "filtered")
+    floor.append(
+      el(
+        "div",
+        { class: "room-empty" },
+        el("h3", {}, "Ningún rol de este edificio coincide con los filtros activos"),
         el(
           "p",
           {},
-          "Este espacio aún no tiene roles que coincidan con tus filtros.",
+          `El edificio tiene ${totalGroups} ${unitLabel("role", totalGroups, true)}, pero los filtros (${filterTexts.join(", ")}) los ocultan todos.`,
         ),
-        button("Asignar un rol", () => chooseRole(id), "button primary"),
+        button("Quitar filtros", removeFilters, "button primary"),
       ),
     );
   for (const group of roleGroups) {
@@ -1610,7 +1678,7 @@ function renderContent() {
     if (v)
       chips.append(
         button(
-          `${{ query: "Buscar", kind: "Tipo", space: "Edificio", project: "Proyecto", specialty: "Especialidad", usage: "Uso" }[k]}: ${org().spaces.find((s) => s.id === v)?.name || org().projects.find((p) => p.id === v)?.name || USAGE_FILTERS[v] || v} ×`,
+          `${filterChipText(k, v, org())} ×`,
           () => {
             delete prefs.filters[k];
             savePrefs();
@@ -1628,6 +1696,11 @@ function renderContent() {
       : mode === "with"
         ? `Solo lo que consta como usado desde ${usageSince(usage)}.`
         : `Sin uso registrado desde ${usageSince(usage)}: no consta que se haya usado en ese tiempo, lo que no equivale a que no se use.`;
+  // A project nobody worked in reads as an all-zero city: say so instead of leaving it unexplained.
+  const projectNote = document.querySelector("#project-note"),
+    filtered = prefs.filters.project ? cityAgents().byProject[prefs.filters.project] : null;
+  projectNote.textContent =
+    filtered && filtered.agents === 0 ? "Este proyecto aún no tiene agentes asignados ni usados." : "";
   const stage = document.querySelector("#stage");
   city?.dispose?.();
   city = undefined;
@@ -1641,6 +1714,8 @@ function renderContent() {
       let failed = false,
         handle;
       try {
+        const agents = cityAgents();
+        renderedCitySignature = citySignature(agents);
         handle = renderCity3D(
           map,
           org(),
@@ -1648,7 +1723,12 @@ function renderContent() {
           {
             onSpace: openRoom,
             onRole: selectItem,
+            onProject: filterByProject,
             selectedSpace: prefs.space,
+            selectedProject: prefs.filters.project ?? null,
+            agents,
+            catalog: data.catalog,
+            filtered: hasActiveFilters(prefs.filters),
             grouped: grouping(),
             onFallback: () => {
               // May fire during creation or later (context lost): never loop retries.
@@ -1659,7 +1739,7 @@ function renderContent() {
               }
             },
           },
-          { bySpace: liveMap.bySpace, byRole: liveMap.byRole },
+          { bySpace: liveMap.bySpace, byRole: liveMap.byRole, byProject: liveProjects },
         );
         if (failed) {
           handle?.dispose?.();
@@ -1680,6 +1760,8 @@ function renderContent() {
           onRole: selectItem,
           selectedSpace: prefs.space,
           grouped: grouping(),
+          catalog: data.catalog,
+          filtered: hasActiveFilters(prefs.filters),
         });
       } catch {
         stage.replaceChildren(
@@ -1743,7 +1825,7 @@ function renderContent() {
         "p",
         { class: "map-tip" },
         is3d
-          ? "Arrastra para mover · Hasta 3 figuras por edificio · Entra para ver todos"
+          ? "Arrastra para mover · Altura = agentes únicos · Lotes: agentes asignados o usados en el proyecto · Hasta 3 figuras por edificio"
           : "Hasta 3 figuras por edificio · Entra para ver todos",
       ),
     );
@@ -1871,8 +1953,13 @@ function refreshBadges() {
   document.querySelectorAll("[data-badge-space]").forEach((node) => {
     const ids = roleIdsForSpace(org(), node.dataset.badgeSpace),
       unique = grouping() ? groupItems(ids.map((id) => byId.get(id) ?? { id })).length : ids.length;
-    node.textContent = String(unique);
-    node.title = unique < ids.length ? `${unique} ${unitLabel("role", unique, true)} · ${ids.length} copias` : roleCountLabel(unique);
+    const spaceIds = new Set(ids),
+      shown = buildingCounts(data.catalog, visible(), spaceIds, grouping(), hasActiveFilters(prefs.filters)),
+      filteredText = shown.shown < shown.total ? `${shown.shown} con los filtros activos` : "";
+    node.replaceChildren(String(unique), filteredText ? el("span", { class: "sr" }, ` (${filteredText})`) : "");
+    node.title =
+      (unique < ids.length ? `${unique} ${unitLabel("role", unique, true)} · ${ids.length} copias` : roleCountLabel(unique)) +
+      (filteredText ? ` · ${filteredText}` : "");
   });
 }
 function render() {
@@ -1908,15 +1995,7 @@ function render() {
         "div",
         { class: "project-scroll", "aria-label": "Lista de proyectos" },
         ...org().projects.map((p) => {
-          const link = button(
-            p.name,
-            () => {
-              prefs.filters.project = p.id;
-              savePrefs();
-              render();
-            },
-            "project-link",
-          );
+          const link = button(p.name, () => filterByProject(p.id), "project-link");
           link.title = p.name;
           return link;
         }),
@@ -2045,6 +2124,7 @@ function render() {
         filters,
         el("div", { id: "active-filters", class: "active-filters" }),
         el("p", { id: "usage-note", class: "hint usage-filter-note", role: "status" }),
+        el("p", { id: "project-note", class: "hint usage-filter-note", role: "status" }),
         el(
           "div",
           { class: "results-line" },
@@ -2113,6 +2193,7 @@ const POLL_MS = 1500,
   POLL_BACKOFF_MS = 5000;
 let live = null,
   liveMap = liveMapping(null),
+  liveProjects = {},
   pollTimer = null,
   pollBusy = false,
   sceneSignature = null;
@@ -2304,17 +2385,19 @@ function refreshLive() {
   try {
     if (!data) return;
     liveMap = liveMapping(live, data.catalog, org());
+    liveProjects = liveByProject(live, org());
     updateLiveSummary();
     refreshRoleChips();
     const signature = JSON.stringify(
       [
         Object.entries(liveMap.bySpace).map(([id, e]) => [id, e.count, e.states]),
         Object.entries(liveMap.byRole).map(([id, s]) => [id, s.length]),
+        Object.entries(liveProjects).map(([id, e]) => [id, e.count, e.states]),
       ],
     );
     if (signature !== sceneSignature) {
       sceneSignature = signature;
-      if (city?.applyLive) city.applyLive(liveMap.bySpace, liveMap.byRole);
+      if (city?.applyLive) city.applyLive(liveMap.bySpace, liveMap.byRole, liveProjects);
       else applyLive(document.querySelector(".map"), liveMap.bySpace);
     }
     if (dialog?.open && dialog.dataset.kind === "now") {
@@ -2359,7 +2442,9 @@ async function loadUsage() {
 }
 // Re-render only what shows usage, so a late answer never rebuilds the city for nothing.
 const usageViewsChanged = () => {
-  if (prefs.filters.usage || prefs.selected || prefs.view === "list") renderContent();
+  // The city only needs a rebuild when usage changed what sizes it (agents per project), not for every usage update.
+  const cityChanged = prefs.view === "city" && !!data && citySignature(cityAgents()) !== renderedCitySignature;
+  if (prefs.filters.usage || prefs.selected || prefs.view === "list" || cityChanged) renderContent();
 };
 const usageChip = (key) => {
   const entry = usageMatched().matched.byKey.get(key);

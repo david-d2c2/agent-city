@@ -17,7 +17,7 @@ except ImportError:
     Store = None
 
 EMPTY_HISTORY = {'importedAt': None, 'from': None, 'to': None, 'files': 0, 'skipped': 0}
-EMPTY = {'since': None, 'liveSince': None, 'skillTracking': False, 'history': EMPTY_HISTORY, 'items': []}
+EMPTY = {'since': None, 'liveSince': None, 'skillTracking': False, 'history': EMPTY_HISTORY, 'items': [], 'projectItems': []}
 NOW = datetime(2026, 3, 20, 12, 0)
 
 
@@ -107,7 +107,7 @@ class StoreUsageTests(UsageCase):
 
     def test_clear_removes_rows_and_meta_and_survives_restart(self):
         self.store.record_usage('claude-code', 'skill', 'x', day='2026-03-30')
-        self.store.replace_usage_history({('2026-01-01', 'agent', 'Old'): 2}, files=1, skipped=0, today='2026-03-30')
+        self.store.replace_usage_history({('2026-01-01', 'agent', 'Old', ''): 2}, files=1, skipped=0, today='2026-03-30')
         other = Store(self.base / 'data')
         self.addCleanup(other.close)
         self.assertEqual(len(other.usage_summary(today='2026-03-30')['items']), 2)
@@ -119,7 +119,7 @@ class StoreUsageTests(UsageCase):
         self.store.record_usage('claude-code', 'skill', 'ancient', day='2024-01-01')
         self.store.record_usage('claude-code', 'skill', 'recent', day='2025-06-01')
         self.assertEqual(sorted(name for _, name in self.items(today='2025-06-01')), ['recent'])
-        self.store.db.execute("INSERT INTO usage VALUES ('2024-01-02', 'codex', 'skill', 'sneaky', 1)")
+        self.store.db.execute("INSERT INTO usage (day, source, kind, name, count) VALUES ('2024-01-02', 'codex', 'skill', 'sneaky', 1)")
         self.store.record_usage('claude-code', 'skill', 'recent', day='2025-06-01')
         self.assertIn(('skill', 'sneaky'), self.items(today='2025-06-01'))
         self.store.record_usage('claude-code', 'skill', 'recent', day='2025-06-02')
@@ -131,7 +131,7 @@ class StoreUsageTests(UsageCase):
 
     def test_items_are_capped_at_five_thousand(self):
         with self.store.db:
-            self.store.db.executemany("INSERT INTO usage VALUES ('2026-03-30', 'claude-code', 'skill', ?, ?)", [('s' + str(n).zfill(5), 1 + n % 7) for n in range(5100)])
+            self.store.db.executemany("INSERT INTO usage (day, source, kind, name, count) VALUES ('2026-03-30', 'claude-code', 'skill', ?, ?)", [('s' + str(n).zfill(5), 1 + n % 7) for n in range(5100)])
         items = self.store.usage_summary(today='2026-03-30')['items']
         self.assertEqual(len(items), 5000)
         self.assertEqual(items[0]['total'], 7)

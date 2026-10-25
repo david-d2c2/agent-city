@@ -86,11 +86,19 @@ Cada importación tiene límites: 2.000 definiciones, 20.000 entradas, profundid
 
 ## Ciudad 3D
 
-La ciudad se dibuja por defecto en 3D isométrico con WebGL (three.js 0.186.1, licencia MIT, incluido en `web/vendor/`; no se descarga nada al ejecutar). Seis edificios con volumen propio, robots por edificio, luces y sombras. Arrastra para mover; los botones acercan, alejan y centran. Los edificios se iluminan con la actividad real (ver más abajo) y no se mueven ni brillan sin eventos.
+La ciudad se dibuja por defecto en 3D isométrico con WebGL (three.js 0.186.1, licencia MIT, incluido en `web/vendor/`; no se descarga nada al ejecutar). Seis edificios con volumen propio (su altura crece con los agentes que contienen), un barrio de lotes por contexto, robots por edificio, luces y sombras. Arrastra para mover; los botones acercan, alejan y centran. Los edificios se iluminan con la actividad real (ver más abajo) y no se mueven ni brillan sin eventos.
 
 El botón **3D / 2D** de los controles alterna con el mapa SVG anterior. Si el navegador no admite WebGL, o se pierde el contexto gráfico, la ciudad cambia sola a 2D. Los nombres de los edificios son botones reales, así que todo se puede usar con teclado, y la vista Lista sigue ofreciendo lo mismo en texto. Con `prefers-reduced-motion` no hay animaciones: solo un brillo fijo.
 
-La etiqueta de cada edificio indica cuántos roles únicos contiene (con «Agrupar copias» desactivado, cuántas copias); las figuras son como máximo tres, solo una muestra.
+La etiqueta de cada edificio indica cuántos roles únicos contiene (con «Agrupar copias» desactivado, cuántas copias); las figuras son como máximo tres, solo una muestra. Con algún filtro activo la etiqueta dice «X de Y roles» (X pasan los filtros, Y tiene el edificio sin filtrar), y la sala avisa de qué filtros están activos con un botón «Quitar filtros»; si el filtro de proyecto no tiene ningún agente, el aviso junto a los filtros lo dice.
+
+### Altura y barrios
+
+- **Altura = agentes únicos.** Cada uno de los seis edificios crece con el número de agentes únicos que contiene (las copias cuentan una vez, y los filtros de búsqueda no cambian la altura). La curva es suave y satura: 0 agentes es lo más bajo, unos 14 la mitad del recorrido y 41 ya casi las tres cuartas partes, con un mínimo y un máximo absolutos por tipo para que nada sea absurdo. Los edificios mantienen su posición; las ventanas conservan su tamaño al crecer.
+- **Barrios por proyecto.** Oficina y Casa dibujan un barrio: una parcela con un lote por proyecto, en una calle delante del centro, con un cartel «Oficina · 16 proyectos». La altura del lote (de una losa baja a seis plantas) depende de los **agentes del proyecto**: los agentes únicos que le has **asignado** a mano **o que se han usado de verdad en él** (registro de uso por proyecto, deducido de la carpeta de la sesión). Los subagentes que trae Claude Code no cuentan, y un agente asignado y usado cuenta una sola vez. Un proyecto sin agentes es una losa baja, pero visible.
+- **Interacción.** Al pasar el ratón por un lote aparece el nombre del proyecto, «N agentes (asignados o usados aquí)» y el último uso si lo hay. Un clic hace lo mismo que pulsar ese proyecto en la barra lateral: filtra por él. Un lote se ilumina solo cuando una sesión en vivo trabaja en la carpeta de ese proyecto. Los lotes no son un paso más del teclado: la lista de proyectos de la barra lateral y la vista Lista son el equivalente. Ten en cuenta que el filtro por proyecto muestra los agentes **asignados** al proyecto; los que solo se han usado en él cuentan para la altura del lote, pero no aparecen en ese filtro.
+- **Muchos proyectos.** Se dibujan como máximo 60 lotes por barrio (los de más agentes) y un marcador «+N más» cuenta el resto; todos siguen en la barra lateral. El suelo y el encuadre de la cámara se ajustan al tamaño del plano; sin proyectos la ciudad es la de siempre.
+- La leyenda del pie del mapa lo resume («Altura = agentes únicos · Lotes: asignados o usados en el proyecto»). El mapa 2D no dibuja barrios.
 
 Los edificios y robots son formas generadas con código, con estilo de maqueta de ciencia ficción, no modelos 3D fotorrealistas.
 

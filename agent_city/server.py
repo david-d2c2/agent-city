@@ -94,7 +94,8 @@ def make_server(store, port=4317, web_dir=None):
                 # Counting real usage is best effort: a storage problem never fails the hook.
                 usage = usage_of(event)
                 if usage:
-                    store.record_usage(body['source'], *usage)
+                    cwd = event.get('cwd') or self.server.live.last_cwd(body['source'], event['session_id'])
+                    store.record_usage(body['source'], *usage, project=store.project_for_cwd(cwd))
             except Exception:
                 pass
             self.respond(204, b'')

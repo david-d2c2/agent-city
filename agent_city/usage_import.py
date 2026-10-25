@@ -3,10 +3,12 @@
 Privacy contract: transcripts are streamed line by line and only lines that contain a
 literal tool-call marker are parsed. From those, only the skill name or subagent type of
 a tool call and the line timestamp are read; the opaque tool-call id is kept in memory
-for the run only, to drop calls repeated by resumed sessions. Nothing else is read,
-stored, logged or put in an error message.
+for the run only, to drop calls repeated by resumed sessions. The line's working folder is
+read only to look up the registered project id it belongs to; the folder itself is never
+stored. Nothing else is read, stored, logged or put in an error message.
 """
 from datetime import datetime
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -73,7 +75,7 @@ def _calls(entry):
                 yield 'agent', agent, block.get('id')
 
 
-def _read(path, counts, seen, deadline):
+def _read(path, counts, seen, deadline, resolve):
     """Stream one transcript into counts; returns False when the time budget ran out."""
     with open(path, 'rb') as handle:
         for number, line in enumerate(handle):
@@ -86,13 +88,15 @@ def _read(path, counts, seen, deadline):
             except (ValueError, RecursionError):
                 continue
             day = _local_day(entry.get('timestamp')) if isinstance(entry, dict) else None
+            cwd = entry.get('cwd') if day else None
+            project = resolve(cwd) if isinstance(cwd, str) and len(cwd) <= 1000 else ''
             for kind, name, call_id in _calls(entry) if day else ():
                 if isinstance(call_id, str) and call_id:
                     if call_id in seen:
                         continue
                     if len(seen) < MAX_IDS:
                         seen.add(call_id)
-                key = (day, kind, name)
+                key = (day, kind, name, project)
                 if key in counts or len(counts) < MAX_KEYS:
                     counts[key] = counts.get(key, 0) + 1
     return True
@@ -106,6 +110,7 @@ def import_claude_history(store, projects_dir=None, now=None, max_files=5000, ma
     now = now or datetime.now()
     deadline = time.monotonic() + budget_seconds
     counts, seen, files, skipped, partial = {}, set(), 0, 0, False
+    resolve = lru_cache(maxsize=4096)(store.project_for_cwd)
     for path, size in _transcripts(root):
         if files + skipped >= max_files or time.monotonic() > deadline:
             partial = True
@@ -114,7 +119,7 @@ def import_claude_history(store, projects_dir=None, now=None, max_files=5000, ma
             skipped += 1
             continue
         try:
-            complete = _read(path, counts, seen, deadline)
+            complete = _read(path, counts, seen, deadline, resolve)
         except OSError:
             skipped += 1
             continue

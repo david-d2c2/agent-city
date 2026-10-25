@@ -1966,6 +1966,64 @@ fieldset {
   }
 }
 
+/* Districts of project lots: signs, «+N más», tooltips */
+.label-3d.district-sign {
+  background: #10252fe6;
+  border-style: dashed;
+}
+.lot-tip,
+.lot-more {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  will-change: transform;
+  border: 1px solid #456573;
+  border-radius: 3px;
+  background: #0f222cf0;
+  color: #d8e7e0;
+  font: 400 11px/1.35 "Segoe UI", sans-serif;
+  white-space: nowrap;
+}
+.lot-tip {
+  padding: 5px 9px;
+  max-width: 280px;
+}
+.lot-tip strong {
+  font: 600 12px/1.3 Bahnschrift, "Segoe UI", sans-serif;
+}
+.lot-tip[hidden] {
+  display: none;
+}
+.lot-tip-live {
+  border-color: var(--live);
+  padding: 2px 7px;
+  font-size: 10px;
+}
+.lot-more {
+  padding: 2px 7px;
+  font: 600 10px/1.3 "Segoe UI", sans-serif;
+  color: #9fd8bb;
+  border-style: dashed;
+}
+.room-filter-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid #b58a4a;
+  border-radius: 4px;
+  background: #3a2d1a55;
+  color: #f0dcb4;
+  font-size: 13px;
+}
+.room-filter-notice p {
+  margin: 0;
+}
+
 /* 3D map on narrow screens: the city is wide, so a square-ish canvas avoids dead space and the caption stays clear of the controls. */
 @media (max-width: 700px) {
   .map.map-3d {

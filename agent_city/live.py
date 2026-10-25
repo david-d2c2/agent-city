@@ -120,6 +120,12 @@ class LiveState:
             elif name in ('Notification', 'PermissionRequest'):
                 main['state'] = 'waiting'
 
+    def last_cwd(self, source, session_id):
+        """Last folder reported by a live session, or '' when unknown."""
+        with self.lock:
+            entry = self.entries.get((source, session_id))
+            return entry['cwd'] if entry else ''
+
     def snapshot(self):
         with self.lock:
             now = self.clock()

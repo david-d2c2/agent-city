@@ -40,6 +40,12 @@ def usage_name(value):
     return None if not name or any(ord(char) < 32 or ord(char) == 127 for char in name) else name
 
 
+def path_key(value):
+    """Comparable form of a folder path; mirrors pathKey in web/model.js (case, slashes and trailing separators ignored)."""
+    text = str(value or '').replace('\\', '/').lower().strip()
+    return text.rstrip('/') if len(text) > 1 else text
+
+
 def default_data_dir():
     return Path(os.environ.get('LOCALAPPDATA', Path.home() / '.local' / 'share')) / 'AgentCity'
 
@@ -54,6 +60,7 @@ class Store:
         self.directory = Path(data_dir) if data_dir is not None else default_data_dir()
         self.home = home
         self.suggestions, self.refreshing = None, False
+        self._org_gen, self._project_paths = 0, None
         self.directory.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.db = sqlite3.connect(self.directory / 'agent-city.sqlite3', check_same_thread=False)
@@ -61,11 +68,37 @@ class Store:
         self.db.execute('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, organization TEXT NOT NULL)')
         # Usage counters live beside, never inside, the organization state blob.
-        self.db.execute('CREATE TABLE IF NOT EXISTS usage (day TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, source, kind, name))')
         self.db.execute('CREATE TABLE IF NOT EXISTS usage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
         with self.db:
             self.db.execute('INSERT OR IGNORE INTO state VALUES (1, ?)', (json.dumps(initial_state()),))
+        try:
+            self._migrate_usage()
+        except BaseException:
+            self.db.close()
+            raise
         self._backup()
+
+    def _migrate_usage(self):
+        """Create the usage table, or rebuild a pre-project one (SQLite cannot alter a primary key) keeping every row with project ''."""
+        shape = "day TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, project TEXT NOT NULL DEFAULT '', count INTEGER NOT NULL, PRIMARY KEY (day, source, kind, name, project)"
+        old = [row[1] for row in self.db.execute('PRAGMA table_info(usage)')]
+        if old and 'project' not in old:
+            # One-off safety copy of the data about to be rebuilt.
+            copy = sqlite3.connect(self.directory / 'agent-city.pre-project-usage.sqlite3')
+            try:
+                self.db.backup(copy)
+            finally:
+                copy.close()
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            old = [row[1] for row in self.db.execute('PRAGMA table_info(usage)')]
+            if not old:
+                self.db.execute('CREATE TABLE usage (' + shape + ')')
+            elif 'project' not in old:
+                self.db.execute('CREATE TABLE usage_new (' + shape + ')')
+                self.db.execute("INSERT INTO usage_new (day, source, kind, name, project, count) SELECT day, source, kind, name, '', count FROM usage")
+                self.db.execute('DROP TABLE usage')
+                self.db.execute('ALTER TABLE usage_new RENAME TO usage')
 
     def close(self):
         with self.lock:
@@ -266,6 +299,7 @@ class Store:
                 organization['revision'] += 1
                 state['organization'] = organization
                 self._write(state)
+            self._org_gen += 1
             return self.bootstrap()
 
     def undo(self):
@@ -282,7 +316,22 @@ class Store:
                 state['organization'] = previous
                 self.db.execute('DELETE FROM history WHERE id=?', (row[0],))
                 self._write(state)
+            self._org_gen += 1
             return self.bootstrap()
+
+    def project_for_cwd(self, cwd):
+        """Id of the registered project whose folder contains `cwd` (whole segments, longest folder wins), else ''."""
+        target = path_key(cwd) if isinstance(cwd, str) else ''
+        if not target:
+            return ''
+        with self.lock:
+            # The parsed folder list is reused until this store saves/undoes the organization or another connection commits.
+            stamp = (self._org_gen, self.db.execute('PRAGMA data_version').fetchone()[0])
+            if self._project_paths is None or self._project_paths[0] != stamp:
+                keys = [(path_key(project.get('path')), project['id']) for project in self._load()['organization']['projects']]
+                self._project_paths = (stamp, [(key, identity) for key, identity in keys if key and key != '/'])
+            best = max(((len(key), identity) for key, identity in self._project_paths[1] if target == key or target.startswith(key + '/')), default=(0, ''))
+        return best[1]
 
     # Real usage: daily counters per (source, kind, name). Only names and counts are stored, never content.
     def _meta(self, key):
@@ -299,14 +348,14 @@ class Store:
             self.db.execute('DELETE FROM usage WHERE day < ?', (cutoff,))
             self._set_meta('prunedOn', today)
 
-    def record_usage(self, source, kind, name, day=None):
-        """Count one real agent or skill call; returns False when the input is not a valid usage."""
+    def record_usage(self, source, kind, name, day=None, project=''):
+        """Count one real agent or skill call (optionally in a registered project id); returns False when the input is not a valid usage."""
         name = usage_name(name)
-        if source not in USAGE_SOURCES or kind not in USAGE_KINDS or name is None:
+        if source not in USAGE_SOURCES or kind not in USAGE_KINDS or name is None or not isinstance(project, str) or not re.fullmatch(r'([A-Za-z0-9_-]{1,100})?', project):
             return False
         day = day or local_day()
         with self.lock, self.db:
-            self.db.execute('INSERT INTO usage VALUES (?, ?, ?, ?, 1) ON CONFLICT(day, source, kind, name) DO UPDATE SET count = count + 1', (day, source, kind, name))
+            self.db.execute('INSERT INTO usage (day, source, kind, name, project, count) VALUES (?, ?, ?, ?, ?, 1) ON CONFLICT(day, source, kind, name, project) DO UPDATE SET count = count + 1', (day, source, kind, name, project))
             if source != 'history':
                 self._set_meta('liveSince', day, replace=False)
                 if kind == 'skill':
@@ -326,6 +375,9 @@ class Store:
             rows = self.db.execute(
                 'SELECT kind, name, SUM(count), SUM(CASE WHEN day BETWEEN ? AND ? THEN count ELSE 0 END), SUM(CASE WHEN day BETWEEN ? AND ? THEN count ELSE 0 END), MAX(day) FROM usage GROUP BY kind, name ORDER BY SUM(count) DESC, name, kind LIMIT ?',
                 (last7, today, last30, today, USAGE_MAX_ITEMS)).fetchall()
+            per_project = self.db.execute(
+                "SELECT project, kind, name, SUM(count), SUM(CASE WHEN day BETWEEN ? AND ? THEN count ELSE 0 END), SUM(CASE WHEN day BETWEEN ? AND ? THEN count ELSE 0 END), MAX(day) FROM usage WHERE project != '' GROUP BY project, kind, name ORDER BY SUM(count) DESC, name, kind, project LIMIT ?",
+                (last7, today, last30, today, USAGE_MAX_ITEMS)).fetchall()
             history = json.loads(self._meta('history') or 'null') or {'importedAt': None, 'from': None, 'to': None, 'files': 0, 'skipped': 0}
             return {
                 'since': self.db.execute('SELECT MIN(day) FROM usage').fetchone()[0],
@@ -333,10 +385,11 @@ class Store:
                 'skillTracking': self._meta('skillTracking') == '1',
                 'history': history,
                 'items': [{'kind': kind, 'name': name, 'total': total, 'last7': week, 'last30': month, 'lastAt': last} for kind, name, total, week, month, last in rows],
+                'projectItems': [{'projectId': project, 'kind': kind, 'name': name, 'total': total, 'last7': week, 'last30': month, 'lastAt': last} for project, kind, name, total, week, month, last in per_project],
             }
 
     def replace_usage_history(self, counts, files, skipped, today=None, imported_at=None):
-        """Swap the imported history rows for `counts` {(day, kind, name): n}; returns what was kept.
+        """Swap the imported history rows for `counts` {(day, kind, name, project): n}; returns what was kept.
 
         Only days before the first live day (and inside the retention window) are kept, so history never double counts live data.
         """
@@ -346,9 +399,9 @@ class Store:
             live = self._meta('liveSince')
             kept = {key: n for key, n in counts.items() if key[0] >= floor and (live is None or key[0] < live)}
             self.db.execute("DELETE FROM usage WHERE source='history'")
-            self.db.executemany("INSERT INTO usage VALUES (?, 'history', ?, ?, ?)", [(day, kind, name, n) for (day, kind, name), n in kept.items()])
-            days = sorted({day for day, _, _ in kept})
-            result = {kind: sum(n for (_, k, _), n in kept.items() if k == kind) for kind in USAGE_KINDS}
+            self.db.executemany("INSERT INTO usage (day, source, kind, name, project, count) VALUES (?, 'history', ?, ?, ?, ?)", [(day, kind, name, project, n) for (day, kind, name, project), n in kept.items()])
+            days = sorted({key[0] for key in kept})
+            result = {kind: sum(n for key, n in kept.items() if key[1] == kind) for kind in USAGE_KINDS}
             result.update(files=files, skipped=skipped, **{'from': days[0] if days else None, 'to': days[-1] if days else None})
             self._set_meta('history', json.dumps({'importedAt': imported_at or now(), 'from': result['from'], 'to': result['to'], 'files': files, 'skipped': skipped}))
             return result

@@ -525,9 +525,10 @@ export const GUIDE_STEPS = [
     body: [
       "La ciudad es tu organización. Tiene seis edificios, de dos tipos.",
       "Un edificio es solo una forma de mirar la misma información, no una copia. Un agente puede estar en varios edificios a la vez. Haz clic en un edificio para entrar y ver a sus agentes. La vista Lista muestra lo mismo con buscador. Los nombres se pueden cambiar.",
+      "Cuanto más alto es un edificio, más agentes únicos tiene (las copias de un mismo agente cuentan una vez). Cada proyecto aparece como un lote en el barrio de su contexto, y su altura depende de los agentes que le has asignado o que se han usado en él. Un clic en un lote filtra por ese proyecto.",
     ],
     bullets: [
-      "Oficina y Casa son contextos de trabajo (profesional y personal): ahí viven tus proyectos.",
+      "Oficina y Casa son contextos de trabajo (profesional y personal): ahí viven tus proyectos, dibujados como un barrio de lotes.",
       "Biblioteca, Taller, Estudio y Torre de control son especialidades: agrupan a los agentes según lo que hacen (conocimiento, desarrollo, creación, seguimiento).",
     ],
   },
@@ -690,3 +691,114 @@ export const filterByUsage = (groups, matched, mode) =>
   Object.hasOwn(USAGE_FILTERS, mode)
     ? (groups ?? []).filter((g) => (usageCount(matched?.byKey?.get(g.key)) > 0) === (mode === "with"))
     : (groups ?? []);
+
+// ---- City scale (pure): distinct agents per building and per project ----
+// «Distinct» always means unique groups (copies of one agent count once). A project's agents are the groups manually
+// ASSIGNED to it (assignments with its projectId) plus the groups actually USED in it (per-project usage rows),
+// matched to the catalog like the global usage is. Built-in subagents never count (matchUsage leaves them unmatched).
+const roleItems = (catalog) => (catalog ?? []).filter((i) => i?.kind === "role");
+export function uniqueAgentsBySpace(org, catalog) {
+  const byId = new Map(roleItems(catalog).map((i) => [i.id, i]));
+  const out = {};
+  for (const space of org?.spaces ?? []) {
+    const keys = new Set();
+    for (const id of roleIdsForSpace(org, space.id)) {
+      const item = byId.get(id);
+      if (item) keys.add(groupKey(item));
+    }
+    out[space.id] = keys.size;
+  }
+  return out;
+}
+// projectItems: GET /api/usage `projectItems` (may be missing). Returns {projectId: {agents, assigned, used, lastAt}}
+// for every project of the organization; lastAt is the latest recorded use of anything in that project.
+export function projectAgentStats(org, catalog, projectItems) {
+  const roles = roleItems(catalog);
+  const byId = new Map(roles.map((i) => [i.id, i]));
+  const groups = groupItems(roles);
+  const rows = new Map();
+  for (const row of Array.isArray(projectItems) ? projectItems : []) {
+    if (!row || typeof row.projectId !== "string") continue;
+    if (!rows.has(row.projectId)) rows.set(row.projectId, []);
+    rows.get(row.projectId).push(row);
+  }
+  const assigned = new Map();
+  for (const a of org?.assignments ?? []) {
+    const item = a?.projectId ? byId.get(a.roleId) : null;
+    if (!item) continue;
+    if (!assigned.has(a.projectId)) assigned.set(a.projectId, new Set());
+    assigned.get(a.projectId).add(groupKey(item));
+  }
+  const out = {};
+  for (const project of org?.projects ?? []) {
+    const mine = rows.get(project.id) ?? [];
+    const used = new Set();
+    for (const [key, entry] of matchUsage(groups, mine.filter((r) => r.kind === "agent")).byKey)
+      if (entry.total > 0) used.add(key);
+    const both = new Set([...(assigned.get(project.id) ?? []), ...used]);
+    const lastAt = mine.reduce((m, r) => (typeof r.lastAt === "string" && r.lastAt > m ? r.lastAt : m), "");
+    out[project.id] = {
+      agents: both.size,
+      assigned: assigned.get(project.id)?.size ?? 0,
+      used: used.size,
+      lastAt: lastAt || null,
+    };
+  }
+  return out;
+}
+// Active live sessions grouped by the registered project their folder belongs to (longest path prefix wins).
+export function liveByProject(live, org) {
+  const out = {};
+  for (const session of Array.isArray(live?.sessions) ? live.sessions : []) {
+    if (!session || typeof session !== "object" || !session.active) continue;
+    const project = projectForCwd(org, session.cwd);
+    if (!project) continue;
+    const entry = (out[project.id] ??= { count: 0, states: { working: 0, waiting: 0 }, sessions: [] });
+    entry.count += 1;
+    if (session.state === "waiting") entry.states.waiting += 1;
+    else entry.states.working += 1;
+    entry.sessions.push(session);
+  }
+  return out;
+}
+
+// ---- Filtered counts (pure). With filters active a building says «X de Y roles»: X pass the filters, Y is everything it
+// holds, so an empty-looking building never reads as «broken data». ----
+export const FILTER_LABELS = {
+  query: "Buscar",
+  kind: "Tipo",
+  space: "Edificio",
+  project: "Proyecto",
+  specialty: "Especialidad",
+  usage: "Uso",
+};
+export const hasActiveFilters = (filters) => Object.values(filters ?? {}).some(Boolean);
+export const filterChipText = (key, value, org) =>
+  `${FILTER_LABELS[key] ?? key}: ${
+    org?.spaces?.find((s) => s.id === value)?.name ||
+    org?.projects?.find((p) => p.id === value)?.name ||
+    USAGE_FILTERS[value] ||
+    value
+  }`;
+export const activeFilterTexts = (filters, org) =>
+  Object.entries(filters ?? {})
+    .filter(([, value]) => value)
+    .map(([key, value]) => filterChipText(key, value, org));
+// «32 roles», or «0 de 32 roles» when filters hide part of the building.
+export function roleCountOf(shown, total, filtered, unique = false) {
+  const x = Math.max(0, Number(shown) || 0),
+    y = Math.max(x, Number(total) || 0);
+  return filtered && x < y
+    ? `${fmt(x)} de ${fmt(y)} ${unitLabel("role", y, unique)}`
+    : `${fmt(y)} ${unitLabel("role", y, unique)}`;
+}
+// Which empty state a room shows: nothing assigned at all, or everything hidden by the active filters.
+export const emptyRoomKind = (total, shown) => (!(total > 0) ? "empty" : shown > 0 ? "none" : "filtered");
+export const filterNoticeText = (texts, shown, total, unique = true) =>
+  `Filtros activos: ${(texts ?? []).join(", ")}. Mostrando ${fmt(shown)} de ${fmt(total)} ${unitLabel("role", total, unique)}.`;
+// Roles of a building for a view: what passes the filters (shown) and what it holds without them (total).
+export function buildingCounts(catalog, visibleItems, ids, grouped, filtered) {
+  const shown = buildingRoles(visibleItems, ids, grouped).total;
+  const total = filtered ? Math.max(shown, buildingRoles(catalog, ids, grouped).total) : shown;
+  return { shown, total, text: roleCountOf(shown, total, filtered, false) };
+}
