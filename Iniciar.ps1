@@ -31,5 +31,7 @@ if (-not $found) {
     Write-Error 'No se encontro Python 3.11 o posterior. Instalalo desde https://www.python.org/downloads/'
     exit 1
 }
-& $found.Exe @($found.Args) -m agent_city --port $Port --data-dir $DataDir --open
-exit $LASTEXITCODE
+# Windowless start: pyw/pythonw have no console, and this script returns at once.
+$windowless = Join-Path (Split-Path $found.Exe) $(if ($found.Args.Count) { 'pyw.exe' } else { 'pythonw.exe' })
+if (-not (Test-Path -LiteralPath $windowless)) { $windowless = $found.Exe }
+Start-Process -FilePath $windowless -ArgumentList (@($found.Args) + @('-m', 'agent_city', '--port', $Port, '--data-dir', "`"$DataDir`"", '--open')) -WindowStyle Hidden

@@ -2,6 +2,7 @@ import copy
 import http.client
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -597,7 +598,12 @@ class HTTPTests(Fixture, unittest.TestCase):
             self.assertIn(self.request('GET', path)[0], (403, 404), path)
 
     def test_occupied_port_reports_readable_error(self):
-        result = subprocess.run([sys.executable, '-m', 'agent_city', '--data-dir', str(self.base / 'second'), '--port', str(self.port)], capture_output=True, text=True, timeout=5)
+        # A port held by something other than Agent City is an error; a running Agent City is reused instead.
+        blocker = socket.socket()
+        self.addCleanup(blocker.close)
+        blocker.bind(('127.0.0.1', 0))
+        blocker.listen()
+        result = subprocess.run([sys.executable, '-m', 'agent_city', '--data-dir', str(self.base / 'second'), '--port', str(blocker.getsockname()[1])], capture_output=True, text=True, timeout=5)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('No se pudo iniciar', result.stderr)
         self.assertNotIn('Traceback', result.stderr)

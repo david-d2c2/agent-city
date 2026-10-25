@@ -23,11 +23,13 @@ Es para quien usa varios agentes y skills y quiere orden y visibilidad. **No es*
 
 Necesitas Python 3.11 o posterior. No hay paquetes que instalar.
 
-1. Abre **Iniciar.cmd** con doble clic.
-2. El navegador abrirá **http://127.0.0.1:4317**.
-3. Mantén la consola abierta mientras usas la ciudad. Para detenerla, pulsa `Ctrl+C` en esa consola.
+1. Abre **Iniciar.cmd** con doble clic. No deja ninguna ventana abierta: la ciudad se ejecuta en segundo plano.
+2. El navegador abrirá **http://127.0.0.1:4317**. Si ya estaba en marcha, simplemente abre esa pestaña.
+3. Para detenerla, abre **Detener.cmd**. Si la dejas en marcha, no pasa nada: consume muy poco y la actividad en vivo la necesita activa.
 
-También puedes ejecutar `./Iniciar.ps1` desde PowerShell. Si la política de PowerShell impide abrir scripts, utiliza `Iniciar.cmd`; no es necesario cambiar la política del sistema.
+La ciudad es un pequeño servidor local, así que tiene que estar en marcha mientras la usas; solo que no necesita ventana. Si algo falla al arrancar, el motivo queda en `.local/agent-city.log`. Para verla con consola (útil al depurar), ejecuta `python -m agent_city --open`.
+
+También puedes ejecutar `./Iniciar.ps1` desde PowerShell (también arranca sin ventana). Si la política de PowerShell impide abrir scripts, utiliza `Iniciar.cmd`; no es necesario cambiar la política del sistema.
 
 Los lanzadores buscan Python con el lanzador `py` de Windows (3.13, 3.12, 3.11 o 3.14) y, si no existe, con `python`. Así funcionan aunque el `PATH` de Windows esté incompleto, algo habitual cuando se han instalado varias versiones de Python. Si no encuentran ninguna, lo dicen y esperan una tecla.
 
