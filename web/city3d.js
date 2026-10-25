@@ -2,7 +2,7 @@
 // Layout data lives in city3d-layout.js (pure). The renderer/canvas is a module-level
 // singleton so re-rendering the app never accumulates WebGL contexts.
 import * as THREE from "./vendor/three.module.js";
-import { roleIdsForSpace } from "./model.js";
+import { buildingRoles, roleCountLabel, roleIdsForSpace } from "./model.js";
 import {
   BUILDINGS,
   GROUND,
@@ -755,13 +755,15 @@ function createCity(container, organization, visible, options, renderer, canvas)
     sel.raycast = noRaycast;
     scene.add(sel);
 
-    const ids = new Set(roleIdsForSpace(organization, space.id));
-    const roles = (visible ?? [])
-      .filter((r) => r.kind === "role" && ids.has(r.id))
-      .slice(0, 3);
+    // At most 3 figures are drawn, but the label counts every role of the building.
+    const { total, shown: roles } = buildingRoles(
+      visible,
+      new Set(roleIdsForSpace(organization, space.id)),
+      options.grouped !== false,
+    );
     buildings.push({
       space, type, spec, group, glow, effects, beamMat, arc, arcMat, sel, selMat,
-      roles, light: null, state: null, label: null, labelW: 90, labelH: 36,
+      roles, total, light: null, state: null, label: null, labelW: 90, labelH: 36,
     });
   });
 
@@ -835,14 +837,14 @@ function createCity(container, organization, visible, options, renderer, canvas)
     label.type = "button";
     label.className = "label-3d" + (b.space.id === selectedId ? " selected" : "");
     label.dataset.spaceId = b.space.id;
-    b.base = `Entrar en ${b.space.name}`;
+    b.base = `Entrar en ${b.space.name}, ${roleCountLabel(b.total)}`;
     label.setAttribute("aria-label", b.base);
     const name = document.createElement("span");
     name.className = "label-3d-name";
     name.textContent = b.space.name;
     const count = document.createElement("span");
     count.className = "label-3d-count";
-    count.textContent = `${b.roles.length} ${b.roles.length === 1 ? "rol" : "roles"}`;
+    count.textContent = roleCountLabel(b.total);
     Object.assign(count.style, { font: "400 10px/1.2 Segoe UI, sans-serif", opacity: "0.75" });
     const row = document.createElement("span");
     row.className = "label-3d-row";

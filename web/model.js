@@ -286,6 +286,83 @@ export const sourceLabel = (source) =>
     : source === "codex"
       ? "Codex"
       : String(source ?? "Desconocido");
+
+// ---- Duplicate grouping (pure). Copies of one logical agent/skill keep their own ids, assignments and links;
+// groups are derived in the browser from the catalog and never stored. ----
+const WORD_BREAKS = /[^\p{L}\p{N}\p{M}]+/gu; // \p{M}: marks of non-Latin scripts are not separators
+const isValid = (item) =>
+  !!item && typeof item === "object" && (item.validity == null || item.validity === "valid");
+// Same kind + same name once case, accents and separators ("UX Researcher", "ux-researcher") are ignored.
+// Invalid items and empty names never merge with anything.
+export function groupKey(item) {
+  const words = isValid(item) ? normalize(item.name).replace(WORD_BREAKS, " ").trim() : "";
+  return words ? `${item.kind}:${words}` : `id:${item?.id}`;
+}
+const RUNTIME_LABELS = { "claude-agents": "Claude Code", roles: "Codex" };
+// Human label of where a copy comes from: the runtime for roles, the connected folder's label otherwise.
+export const originLabel = (item, rootLabels) =>
+  (item?.kind === "role" && RUNTIME_LABELS[item.source?.format]) ||
+  rootLabels?.[item?.source?.rootId] ||
+  "Origen desconocido";
+// "Same declared metadata" compares the digest of the declared header only, never the file body.
+export const sameMetadata = (a, b) => !!a?.digest && a.digest === b?.digest;
+export function groupItems(items, rootLabels) {
+  const byKey = new Map();
+  for (const item of items ?? []) {
+    const key = groupKey(item);
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(item);
+  }
+  return [...byKey].map(([key, variants]) => {
+    const valid = variants.filter(isValid);
+    const primary =
+      valid.find((v) => String(v.description ?? "").trim()) ?? valid[0] ?? variants[0];
+    return {
+      key,
+      kind: primary.kind,
+      name: primary.name,
+      items: variants,
+      primary,
+      count: variants.length,
+      identical: valid.length < 2 || valid.every((v) => sameMetadata(v, valid[0])),
+      origins: [...new Set(variants.map((v) => originLabel(v, rootLabels)))],
+    };
+  });
+}
+export const countSummary = (items) => ({
+  unique: groupItems(items).length,
+  copies: (items ?? []).length,
+});
+const fmt = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+export const unitLabel = (kind, n, unique = false) => {
+  const one = n === 1,
+    skill = kind === "skill",
+    noun = skill ? (one ? "skill" : "skills") : one ? "rol" : "roles";
+  return unique ? `${noun} ${skill ? (one ? "única" : "únicas") : one ? "único" : "únicos"}` : noun;
+};
+// «145 roles únicos · 229 copias», or plain «145 roles» when nothing repeats.
+export function countLabel(kind, { unique, copies }) {
+  const dup = copies > unique;
+  return `${fmt(unique)} ${unitLabel(kind, unique, dup)}${dup ? ` · ${fmt(copies)} copias` : ""}`;
+}
+// Results line: «145 roles únicos (229 copias) · 471 skills únicas (1.647 copias) en resultados».
+export function resultsLabel(items, grouped = true) {
+  const part = (kind) => {
+    const of = (items ?? []).filter((i) => i.kind === kind);
+    const unique = grouped ? countSummary(of).unique : of.length;
+    return unique < of.length
+      ? `${fmt(unique)} ${unitLabel(kind, unique, true)} (${fmt(of.length)} copias)`
+      : `${fmt(unique)} ${unitLabel(kind, unique)}`;
+  };
+  return `${part("role")} · ${part("skill")} en resultados`;
+}
+export const roleCountLabel = (n) => `${fmt(n)} ${unitLabel("role", n)}`;
+// Roles of a building (ids = its role ids): the real total plus at most `limit` figures to draw.
+export function buildingRoles(items, ids, grouped = true, limit = 3) {
+  const roles = (items ?? []).filter((r) => r.kind === "role" && ids.has(r.id));
+  const list = grouped ? groupItems(roles).map((g) => g.primary) : roles;
+  return { total: list.length, shown: list.slice(0, limit) };
+}
 export const stateLabel = (state) =>
   ({ working: "Trabajando", waiting: "Esperando", idle: "En reposo" })[
     state
@@ -331,32 +408,79 @@ function classifyRole(role) {
   }
   return { type: DEFAULT_SPECIALTY, reason: "Sin palabras clave reconocidas: va al Taller por defecto" };
 }
-// Proposes a specialty building for every valid role that has no assignment yet.
-// Existing assignments are never touched and skill links are never proposed (they stay manual).
+// Proposes a building per GROUP of copies (same name), never per copy, so copies never split across buildings.
+// Each item: {roleId (representative, also the selection token), roleIds (every unplaced copy that gets assigned),
+// spaceId/spaceIds/spaceName, name, count, origins, reason}. Placed copies are never touched: when some copy of a
+// group is already in a building, its unplaced siblings follow it there. Skill links are never proposed.
 export function proposeOrganization(catalog, organization) {
-  const placed = new Set((organization.assignments ?? []).map((a) => a.roleId));
+  const assignments = organization.assignments ?? [];
+  const placed = new Set(assignments.map((a) => a.roleId));
   const building = (type) =>
     organization.spaces.find((s) => s.kind === "specialty" && s.type === type);
+  const roles = (catalog ?? []).filter((r) => r.kind === "role" && r.validity === "valid");
   const items = [];
-  for (const role of catalog ?? []) {
-    if (role.kind !== "role" || role.validity !== "valid" || placed.has(role.id)) continue;
-    const { type, reason } = classifyRole(role);
+  for (const group of groupItems(roles)) {
+    const open = group.items.filter((r) => !placed.has(r.id));
+    if (!open.length) continue;
+    const ids = new Set(group.items.map((r) => r.id));
+    const homes = [
+      ...new Set(assignments.filter((a) => a.spaceId && ids.has(a.roleId)).map((a) => a.spaceId)),
+    ]
+      .map((id) => organization.spaces.find((s) => s.id === id))
+      .filter(Boolean);
+    const base = {
+      roleId: open[0].id,
+      roleIds: open.map((r) => r.id),
+      name: group.name,
+      count: open.length,
+      origins: [...new Set(open.map((r) => originLabel(r)))],
+    };
+    if (homes.length) {
+      const names = homes.map((s) => s.name).join(", ");
+      items.push({
+        ...base,
+        spaceId: homes[0].id,
+        spaceIds: homes.map((s) => s.id),
+        spaceName: names,
+        reason: `Copia de «${group.name}» ya colocada en ${names}`,
+      });
+      continue;
+    }
+    const { type, reason } = classifyRole(group.primary);
     const space = building(type) ?? building(DEFAULT_SPECIALTY);
     if (space)
-      items.push({ roleId: role.id, name: role.name, spaceId: space.id, spaceName: space.name, reason });
+      items.push({ ...base, spaceId: space.id, spaceIds: [space.id], spaceName: space.name, reason });
   }
-  const room = Math.max(0, MAX_ROWS - organization.assignments.length);
-  return { items: items.slice(0, room), truncated: items.length > room };
+  // A group is applied whole or not at all, so the row limit skips the groups that do not fit.
+  const room = Math.max(0, MAX_ROWS - assignments.length);
+  let used = 0,
+    truncated = false;
+  const fitting = items.filter((item) => {
+    const rows = item.roleIds.length * item.spaceIds.length;
+    if (used + rows > room) return (truncated = true), false;
+    used += rows;
+    return true;
+  });
+  return { items: fitting, truncated };
 }
+// selectedIds are item.roleId tokens; each expands to every copy (roleIds) in every target building (spaceIds).
 export function applyProposal(organization, proposal, selectedIds) {
   const next = structuredClone(organization);
   const chosen = new Set(selectedIds);
   const known = new Set(next.assignments.map((a) => `${a.roleId}|${a.spaceId ?? ""}|${a.projectId ?? ""}`));
   for (const item of proposal.items) {
-    const key = `${item.roleId}|${item.spaceId}|`;
-    if (!chosen.has(item.roleId) || known.has(key) || next.assignments.length >= MAX_ROWS) continue;
-    known.add(key);
-    next.assignments.push({ roleId: item.roleId, spaceId: item.spaceId });
+    if (!chosen.has(item.roleId)) continue;
+    const adds = [];
+    for (const spaceId of item.spaceIds ?? [item.spaceId])
+      for (const roleId of item.roleIds ?? [item.roleId]) {
+        const key = `${roleId}|${spaceId}|`;
+        if (!known.has(key)) adds.push([key, { roleId, spaceId }]);
+      }
+    if (next.assignments.length + adds.length > MAX_ROWS) continue;
+    for (const [key, assignment] of adds) {
+      known.add(key);
+      next.assignments.push(assignment);
+    }
   }
   return next;
 }

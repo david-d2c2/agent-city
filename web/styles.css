@@ -2363,3 +2363,106 @@ fieldset {
     max-height: 104px;
   }
 }
+
+/* Grouped copies: ×N badge, "Agrupar copias" switch, copies list in the detail panel */
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.copy-badge {
+  display: inline-block;
+  justify-self: start;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #17303b;
+  color: var(--green);
+  font: 600 11px/18px "Cascadia Mono", Consolas, monospace;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.inventory-row {
+  position: relative;
+}
+.inventory-row .copy-badge {
+  position: absolute;
+  top: 12px;
+  right: 10px;
+}
+.inventory-row:has(.copy-badge) strong {
+  padding-right: 56px;
+}
+.room-agent .copy-badge {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  z-index: 1;
+}
+.check .copy-badge {
+  margin-left: 8px;
+  vertical-align: 1px;
+}
+.group-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.group-switch input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--green);
+}
+.copies {
+  margin: 14px 0;
+}
+.copies h3 {
+  margin: 0 0 4px;
+}
+.copy-row {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+.copy-row > span {
+  display: grid;
+  gap: 3px;
+}
+.copy-row:hover,
+.copy-row.active {
+  border-color: var(--green);
+  background: #233e48;
+}
+.copy-row strong {
+  font-size: 12px;
+}
+.copy-row .source-caption {
+  color: var(--muted);
+  font-size: 10px;
+}
+.copy-relation {
+  justify-self: start;
+  padding: 0 8px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--green);
+  font-size: 10px;
+}
+.copy-relation.differs {
+  color: var(--clay);
+}

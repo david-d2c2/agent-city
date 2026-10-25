@@ -451,7 +451,7 @@ test("proposeOrganization picks a building by keyword and explains why", () => {
     roleItem("d", "Software Architect"),
     roleItem("e", "Code Reviewer"),
     roleItem("f", "Ana", { specialty: "Investigación de mercado" }),
-    roleItem("g", "Ana", { description: "Diseña interfaces con CSS" }),
+    roleItem("g", "Beto", { description: "Diseña interfaces con CSS" }),
     roleItem("h", "Misterio"),
   ];
   const { items, truncated } = model.proposeOrganization(catalog, { spaces, assignments: [] });
@@ -566,4 +566,291 @@ test("addProjectsFromFolders creates context projects and skips known names and 
   assert.equal(organization.projects.length, 2);
   const again = model.addProjectsFromFolders(result.organization, folders, "home", () => "x");
   assert.equal(again.added, 0);
+});
+
+// ---- Grouping of copies (same kind + normalized name) ----
+const copy = (id, name, extra = {}) => ({
+  id, kind: "role", validity: "valid", name, description: "", specialty: "", digest: `d-${id}`,
+  source: { rootId: "r-codex", relativePath: `${id}.toml`, format: "roles" }, ...extra,
+});
+const claudeCopy = (id, name, extra = {}) =>
+  copy(id, name, { source: { rootId: "r-claude", relativePath: `${id}.md`, format: "claude-agents" }, ...extra });
+
+test("groupKey ignores case, accents and separators but never kind", () => {
+  const key = (name, kind = "role") => model.groupKey({ id: "x", kind, name });
+  assert.equal(key("UX Researcher"), "role:ux researcher");
+  assert.equal(key("ux-researcher"), key("UX Researcher"));
+  assert.equal(key("UX_researcher"), key("UX Researcher"));
+  assert.equal(key("  ux --  researcher.. "), key("UX Researcher"));
+  assert.equal(key("Diseño Élite"), key("DISENO elite"));
+  assert.notEqual(key("Design", "role"), key("Design", "skill"));
+  assert.notEqual(key("ux researcher"), key("uxresearcher"));
+});
+
+test("groupKey keeps non-Latin names apart instead of collapsing them to empty", () => {
+  const key = (name) => model.groupKey({ id: "x", kind: "skill", name });
+  assert.equal(key("日本語 ツール"), "skill:日本語 ツール");
+  assert.notEqual(key("日本語"), key("中文"));
+  assert.notEqual(key("Дизайнер"), key("Разработчик"));
+  assert.equal(key("Дизайнер-UI"), key("дизайнер ui"));
+  assert.equal(key("かな-が"), key("かな が"));
+  assert.equal(key("Tool 2"), key("tool-2"));
+  assert.notEqual(key("Tool 2"), key("Tool 3"));
+});
+
+test("groupKey leaves invalid items and empty names alone", () => {
+  assert.equal(model.groupKey({ id: "a", kind: "role", name: "" }), "id:a");
+  assert.equal(model.groupKey({ id: "b", kind: "role", name: " -- " }), "id:b");
+  assert.equal(model.groupKey({ id: "c", kind: "role", name: "X", validity: "invalid" }), "id:c");
+  assert.equal(model.groupKey({ id: "d", kind: "role", name: "X", validity: "missing" }), "id:d");
+  assert.equal(model.groupKey(null), "id:undefined");
+  const groups = model.groupItems([
+    { id: "a", kind: "role", name: "", validity: "invalid" },
+    { id: "b", kind: "role", name: "", validity: "invalid" },
+  ]);
+  assert.equal(groups.length, 2);
+});
+
+test("groupItems keeps first-appearance order and original variant order", () => {
+  const items = [copy("1", "Beta"), copy("2", "Alpha"), claudeCopy("3", "beta"), copy("4", "ALPHA"), copy("5", "Gamma")];
+  const groups = model.groupItems(items);
+  assert.deepEqual(groups.map((g) => g.name), ["Beta", "Alpha", "Gamma"]);
+  assert.deepEqual(groups.map((g) => g.items.map((i) => i.id)), [["1", "3"], ["2", "4"], ["5"]]);
+  assert.deepEqual(groups.map((g) => g.count), [2, 2, 1]);
+  assert.equal(groups[0].kind, "role");
+  assert.equal(groups[0].key, "role:beta");
+});
+
+test("groupItems picks the first valid variant with a description as primary", () => {
+  const noDesc = copy("1", "Dev");
+  const described = claudeCopy("2", "dev", { description: "Writes code" });
+  const later = copy("3", "DEV", { description: "Other" });
+  assert.equal(model.groupItems([noDesc, described, later])[0].primary.id, "2");
+  assert.equal(model.groupItems([noDesc, copy("4", "dev")])[0].primary.id, "1");
+  assert.equal(model.groupItems([copy("5", "dev", { description: "   " }), described])[0].primary.id, "2");
+  assert.equal(model.groupItems([noDesc])[0].primary, noDesc);
+});
+
+test("groupItems identical means the same declared-metadata digest on every valid copy", () => {
+  const same = model.groupItems([copy("1", "A", { digest: "h" }), claudeCopy("2", "a", { digest: "h" })])[0];
+  assert.equal(same.identical, true);
+  const different = model.groupItems([copy("1", "A", { digest: "h" }), claudeCopy("2", "a", { digest: "z" })])[0];
+  assert.equal(different.identical, false);
+  const noDigest = model.groupItems([copy("1", "A", { digest: "" }), claudeCopy("2", "a", { digest: "" })])[0];
+  assert.equal(noDigest.identical, false);
+  const mixed = model.groupItems([copy("1", "A", { digest: "h" }), claudeCopy("2", "a", { digest: "h" }), copy("3", "a", { digest: "k" })])[0];
+  assert.equal(mixed.identical, false);
+  assert.equal(model.groupItems([copy("1", "Solo")])[0].identical, true);
+  assert.equal(model.sameMetadata(copy("1", "A", { digest: "h" }), copy("2", "A", { digest: "h" })), true);
+  assert.equal(model.sameMetadata(copy("1", "A", { digest: "" }), copy("2", "A", { digest: "" })), false);
+});
+
+test("groupItems origins are unique human labels: runtime for roles, root label for skills", () => {
+  const roles = model.groupItems([copy("1", "A"), claudeCopy("2", "A"), claudeCopy("3", "A", { source: { rootId: "r-plugin", format: "claude-agents" } })])[0];
+  assert.deepEqual(roles.origins, ["Codex", "Claude Code"]);
+  const skill = (id, rootId) => ({ id, kind: "skill", validity: "valid", name: "Deploy", digest: id, source: { rootId, relativePath: `${id}/SKILL.md`, format: "skills" } });
+  const labels = { "r-1": "Claude Code · skills", "r-2": "Codex · skills" };
+  const skills = model.groupItems([skill("a", "r-1"), skill("b", "r-2"), skill("c", "r-1")], labels)[0];
+  assert.deepEqual(skills.origins, ["Claude Code · skills", "Codex · skills"]);
+  assert.deepEqual(model.groupItems([skill("a", "r-9")])[0].origins, ["Origen desconocido"]);
+  assert.equal(model.originLabel(copy("1", "A"), labels), "Codex");
+});
+
+test("groupItems tolerates empty input and does not mutate it", () => {
+  assert.deepEqual(model.groupItems([]), []);
+  assert.deepEqual(model.groupItems(undefined), []);
+  const items = [copy("1", "A"), claudeCopy("2", "a")];
+  const before = structuredClone(items);
+  model.groupItems(items);
+  assert.deepEqual(items, before);
+});
+
+test("countSummary reports unique groups and raw copies", () => {
+  assert.deepEqual(model.countSummary([copy("1", "A"), claudeCopy("2", "a"), copy("3", "B")]), { unique: 2, copies: 3 });
+  assert.deepEqual(model.countSummary([]), { unique: 0, copies: 0 });
+});
+
+test("count labels are honest, singular/plural-correct and Spanish", () => {
+  assert.equal(model.countLabel("role", { unique: 145, copies: 229 }), "145 roles únicos · 229 copias");
+  assert.equal(model.countLabel("role", { unique: 145, copies: 145 }), "145 roles");
+  assert.equal(model.countLabel("role", { unique: 1, copies: 1 }), "1 rol");
+  assert.equal(model.countLabel("role", { unique: 1, copies: 2 }), "1 rol único · 2 copias");
+  assert.equal(model.countLabel("skill", { unique: 1, copies: 3 }), "1 skill única · 3 copias");
+  assert.equal(model.countLabel("skill", { unique: 471, copies: 1647 }), "471 skills únicas · 1.647 copias");
+  assert.equal(model.countLabel("skill", { unique: 0, copies: 0 }), "0 skills");
+  assert.equal(model.unitLabel("skill", 1), "skill");
+  assert.equal(model.unitLabel("role", 2, true), "roles únicos");
+});
+
+test("resultsLabel shows unique counts with copies, or the plain flat counts", () => {
+  const role = (id, name) => ({ id, kind: "role", validity: "valid", name });
+  const skill = (id, name) => ({ id, kind: "skill", validity: "valid", name });
+  const items = [role("1", "A"), role("2", "a"), role("3", "B"), skill("4", "S"), skill("5", "s"), skill("6", "S")];
+  assert.equal(model.resultsLabel(items), "2 roles únicos (3 copias) · 1 skill única (3 copias) en resultados");
+  assert.equal(model.resultsLabel(items, false), "3 roles · 3 skills en resultados");
+  assert.equal(model.resultsLabel([role("1", "A"), skill("2", "B")]), "1 rol · 1 skill en resultados");
+  assert.equal(model.resultsLabel([]), "0 roles · 0 skills en resultados");
+  const many = Array.from({ length: 1647 }, (_, n) => skill(`s${n}`, `skill ${n % 471}`));
+  assert.match(model.resultsLabel(many), /471 skills únicas \(1\.647 copias\)/);
+});
+
+test("roleCountLabel is singular for one and plural otherwise", () => {
+  assert.equal(model.roleCountLabel(1), "1 rol");
+  assert.equal(model.roleCountLabel(0), "0 roles");
+  assert.equal(model.roleCountLabel(3), "3 roles");
+  assert.equal(model.roleCountLabel(65), "65 roles");
+  assert.equal(model.roleCountLabel(1200), "1.200 roles");
+});
+
+test("buildingRoles reports the real total, not the drawn figures", () => {
+  const roles = Array.from({ length: 10 }, (_, n) => copy(`r${n}`, `Role ${n % 5}`));
+  roles.push({ id: "s", kind: "skill", name: "Skill", validity: "valid" });
+  const ids = new Set([...roles.map((r) => r.id)]);
+  const grouped = model.buildingRoles(roles, ids);
+  assert.equal(grouped.total, 5);
+  assert.equal(grouped.shown.length, 3);
+  assert.deepEqual(grouped.shown.map((r) => r.id), ["r0", "r1", "r2"]);
+  const flat = model.buildingRoles(roles, ids, false);
+  assert.equal(flat.total, 10);
+  assert.equal(flat.shown.length, 3);
+  assert.equal(model.buildingRoles(roles, new Set(["r0"])).total, 1);
+  assert.deepEqual(model.buildingRoles(roles, new Set()), { total: 0, shown: [] });
+  assert.equal(model.buildingRoles(roles, ids, true, 10).shown.length, 5);
+});
+
+test("filterCatalog still returns flat copies; a group appears when any copy matches", () => {
+  const items = [
+    copy("1", "Frontend Developer", { description: "UI work" }),
+    claudeCopy("2", "Frontend Developer", { description: "Browser work" }),
+    copy("3", "Backend"),
+  ];
+  const org = { spaces: [], projects: [], assignments: [], skillLinks: [] };
+  const found = model.filterCatalog(items, org, { query: "browser" });
+  assert.deepEqual(found.map((i) => i.id), ["2"]);
+  const groups = model.groupItems(found);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].primary.id, "2");
+  assert.equal(model.filterCatalog(items, org, { query: "frontend" }).length, 2);
+});
+
+// ---- Auto-organize per group ----
+test("proposeOrganization decides once per group from the primary and assigns every copy", () => {
+  const catalog = [
+    copy("a1", "Ana"),
+    claudeCopy("a2", "ana", { description: "Diseña interfaces con CSS" }),
+    copy("a3", "ANA"),
+    copy("b", "Misterio"),
+  ];
+  const { items, truncated } = model.proposeOrganization(catalog, { spaces, assignments: [] });
+  assert.equal(truncated, false);
+  assert.equal(items.length, 2);
+  const [fe, mystery] = items;
+  // primary = first copy with a description (a2): its CSS description picks Estudio, while a1 alone would default to Taller
+  assert.equal(fe.spaceId, "studio");
+  assert.deepEqual(fe.roleIds, ["a1", "a2", "a3"]);
+  assert.equal(fe.roleId, "a1");
+  assert.equal(fe.count, 3);
+  assert.deepEqual(fe.origins, ["Codex", "Claude Code"]);
+  assert.deepEqual(fe.spaceIds, ["studio"]);
+  assert.equal(mystery.count, 1);
+});
+
+test("proposeOrganization never splits copies across buildings", () => {
+  const catalog = [copy("1", "Designer"), claudeCopy("2", "designer", { specialty: "Backend" }), copy("3", "Designer")];
+  const { items } = model.proposeOrganization(catalog, { spaces, assignments: [] });
+  assert.equal(items.length, 1);
+  const next = model.applyProposal({ spaces, assignments: [], projects: [], skillLinks: [] }, { items }, ["1"]);
+  assert.equal(new Set(next.assignments.map((a) => a.spaceId)).size, 1);
+  assert.deepEqual(next.assignments.map((a) => a.roleId).sort(), ["1", "2", "3"]);
+});
+
+test("proposeOrganization sends siblings of a placed copy to the same building, with a reason", () => {
+  const catalog = [copy("1", "Designer"), claudeCopy("2", "designer"), copy("3", "Designer")];
+  const organization = { spaces, assignments: [{ roleId: "1", spaceId: "control" }], projects: [], skillLinks: [] };
+  const before = structuredClone(organization);
+  const { items } = model.proposeOrganization(catalog, organization);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].spaceId, "control"); // not Studio, which "Designer" would get on its own
+  assert.deepEqual(items[0].roleIds, ["2", "3"]);
+  assert.equal(items[0].reason, "Copia de «Designer» ya colocada en Torre de control");
+  assert.equal(items[0].spaceName, "Torre de control");
+  assert.deepEqual(organization, before);
+  const next = model.applyProposal(organization, { items }, [items[0].roleId]);
+  assert.deepEqual(next.assignments, [
+    { roleId: "1", spaceId: "control" },
+    { roleId: "2", spaceId: "control" },
+    { roleId: "3", spaceId: "control" },
+  ]);
+});
+
+test("proposeOrganization follows every building of the placed copy and skips fully placed groups", () => {
+  const catalog = [copy("1", "Designer"), claudeCopy("2", "designer"), copy("x", "Writer"), claudeCopy("y", "writer")];
+  const organization = {
+    spaces,
+    assignments: [
+      { roleId: "1", spaceId: "control" },
+      { roleId: "1", spaceId: "library" },
+      { roleId: "x", spaceId: "library" },
+      { roleId: "y", projectId: "p" },
+    ],
+  };
+  const { items } = model.proposeOrganization(catalog, organization);
+  assert.equal(items.length, 1);
+  assert.deepEqual(items[0].spaceIds, ["control", "library"]);
+  assert.equal(items[0].spaceName, "Torre de control, Biblioteca");
+  const next = model.applyProposal(organization, { items }, ["2"]);
+  assert.equal(next.assignments.length, organization.assignments.length + 2);
+});
+
+test("a placed copy with only a project does not decide the building; the group is classified normally", () => {
+  const catalog = [copy("1", "Designer"), claudeCopy("2", "designer")];
+  const { items } = model.proposeOrganization(catalog, { spaces, assignments: [{ roleId: "1", projectId: "p" }] });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].spaceId, "studio");
+  assert.deepEqual(items[0].roleIds, ["2"]);
+  assert.match(items[0].reason, /Palabra clave/);
+});
+
+test("proposeOrganization never creates skill links and ignores skills and invalid roles", () => {
+  const catalog = [
+    copy("1", "Designer"),
+    { id: "s", kind: "skill", validity: "valid", name: "Designer" },
+    copy("bad", "Designer", { validity: "invalid" }),
+  ];
+  const { items } = model.proposeOrganization(catalog, { spaces, assignments: [] });
+  assert.deepEqual(items.map((i) => i.roleIds), [["1"]]);
+  assert.equal(items[0].skillId, undefined);
+});
+
+test("proposal row limit is per assignment row and never cuts a group in half", () => {
+  const catalog = [copy("a1", "Alpha"), claudeCopy("a2", "alpha"), claudeCopy("a3", "alpha"), copy("b", "Beta")];
+  const nearlyFull = {
+    spaces,
+    assignments: Array.from({ length: model.MAX_ROWS - 2 }, (_, n) => ({ roleId: `x${n}`, spaceId: "office" })),
+  };
+  const limited = model.proposeOrganization(catalog, nearlyFull);
+  assert.equal(limited.truncated, true);
+  assert.deepEqual(limited.items.map((i) => i.roleIds), [["b"]]);
+  const exact = model.proposeOrganization(catalog, {
+    spaces,
+    assignments: Array.from({ length: model.MAX_ROWS - 4 }, (_, n) => ({ roleId: `x${n}`, spaceId: "office" })),
+  });
+  assert.equal(exact.truncated, false);
+  assert.equal(exact.items.length, 2);
+  const forced = model.applyProposal(nearlyFull, { items: [{ roleId: "a1", roleIds: ["a1", "a2", "a3"], spaceId: "studio", spaceIds: ["studio"] }] }, ["a1"]);
+  assert.equal(forced.assignments.length, nearlyFull.assignments.length);
+});
+
+test("applyProposal only expands selected groups and skips copies already placed", () => {
+  const organization = { spaces, projects: [], skillLinks: [], assignments: [{ roleId: "a2", spaceId: "studio" }] };
+  const proposal = {
+    items: [
+      { roleId: "a1", roleIds: ["a1", "a2", "a3"], spaceId: "studio", spaceIds: ["studio"] },
+      { roleId: "b1", roleIds: ["b1", "b2"], spaceId: "library", spaceIds: ["library"] },
+    ],
+  };
+  const next = model.applyProposal(organization, proposal, ["a1"]);
+  assert.deepEqual(next.assignments.map((a) => a.roleId), ["a2", "a1", "a3"]);
+  assert.equal(organization.assignments.length, 1);
+  assert.deepEqual(model.applyProposal(organization, proposal, ["b2"]).assignments, organization.assignments);
 });

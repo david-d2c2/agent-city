@@ -1,4 +1,4 @@
-import { roleIdsForSpace } from "./model.js";
+import { buildingRoles, roleCountLabel, roleIdsForSpace } from "./model.js";
 const NS = "http://www.w3.org/2000/svg";
 function svg(tag, attrs = {}, text) {
   const e = document.createElementNS(NS, tag);
@@ -33,7 +33,8 @@ function architecture(index) {
   ];
   return shell + structures[index % 6];
 }
-function building(space, index, roles, onSpace, onRole, selected) {
+// `roles` are the figures to draw (at most 3); `total` is the real number of roles in the building.
+function building(space, index, roles, total, onSpace, onRole, selected) {
   const [x, y] = positions[index % 6],
     g = svg("g", {
       transform: `translate(${x} ${y})`,
@@ -41,7 +42,7 @@ function building(space, index, roles, onSpace, onRole, selected) {
       "data-space-id": space.id,
       role: "button",
       tabindex: "0",
-      "aria-label": `${space.name}, ${roles.length} roles. Entrar`,
+      "aria-label": `${space.name}, ${roleCountLabel(total)}. Entrar`,
     });
   g.innerHTML = architecture(index);
   const label = svg("g", {
@@ -66,7 +67,7 @@ function building(space, index, roles, onSpace, onRole, selected) {
     svg(
       "text",
       { x: 3, y: 111, "text-anchor": "middle", class: "space-count" },
-      `${roles.length} roles en resultados`,
+      `${roleCountLabel(total)} en resultados`,
     ),
   );
   g.labelOverlay = label;
@@ -78,7 +79,7 @@ function building(space, index, roles, onSpace, onRole, selected) {
       enter();
     }
   });
-  roles.slice(0, 3).forEach((role, i) => {
+  roles.forEach((role, i) => {
     const person = svg("g", {
       transform: `translate(${35 + i * 24} ${41 - i * 9})`,
       class: "agent-person",
@@ -107,7 +108,7 @@ export function renderCity(
   container,
   organization,
   visible,
-  { onSpace, onRole, selectedSpace },
+  { onSpace, onRole, selectedSpace, grouped = true },
 ) {
   const root = svg("svg", {
     viewBox: "0 0 1050 730",
@@ -137,11 +138,12 @@ export function renderCity(
   ].forEach((t) => world.append(marker(...t)));
   const labels = svg("g", { class: "map-labels" });
   organization.spaces.forEach((s, i) => {
-    const ids = new Set(roleIdsForSpace(organization, s.id)),
+    const { total, shown } = buildingRoles(visible, new Set(roleIdsForSpace(organization, s.id)), grouped),
       b = building(
         s,
         i,
-        visible.filter((r) => r.kind === "role" && ids.has(r.id)),
+        shown,
+        total,
         onSpace,
         onRole,
         selectedSpace,
@@ -152,7 +154,7 @@ export function renderCity(
     label.setAttribute("transform", `translate(${x} ${y})`);
     label.setAttribute("role", "button");
     label.setAttribute("tabindex", "0");
-    label.setAttribute("aria-label", `Entrar en ${s.name}`);
+    label.setAttribute("aria-label", `Entrar en ${s.name}, ${roleCountLabel(total)}`);
     label.addEventListener("click", () => onSpace(s.id));
     label.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {

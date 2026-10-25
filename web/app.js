@@ -3,20 +3,28 @@ import {
   TRUTH_TIERS,
   addProjectsFromFolders,
   applyProposal,
+  buildingRoles,
   elapsedLabel,
   filterCatalog,
+  groupItems,
+  groupKey,
   liveMapping,
+  originLabel,
   projectLookup,
   projectSpaces,
   projectsForSpace,
   proposeOrganization,
+  resultsLabel,
   roleCapabilities,
+  roleCountLabel,
   roleIdsForSpace,
+  sameMetadata,
   selectionState,
   skillCapabilities,
   sourceIssues,
   sourceLabel,
   stateLabel,
+  unitLabel,
 } from "./model.js";
 import { applyLive, renderCity } from "./scene.js";
 import { renderCity3D, webglAvailable } from "./city3d.js";
@@ -30,6 +38,7 @@ let prefs = {
   view: matchMedia("(max-width:700px)").matches ? "list" : "city",
   filters: {},
   selected: null,
+  group: true, // one row/card per logical agent or skill; off lists every copy
 };
 try {
   const saved = JSON.parse(localStorage.getItem("agent-city-navigation"));
@@ -65,6 +74,19 @@ const savePrefs = () => {
 };
 const org = () => data.organization;
 const visible = () => filterCatalog(data.catalog, org(), prefs.filters);
+// Copies of the same agent/skill are grouped in the browser only; every copy keeps its own id, assignments and links.
+const grouping = () => prefs.group !== false;
+const rootLabels = () => Object.fromEntries(data.roots.map((r) => [r.id, r.label]));
+const groupsOf = (items) =>
+  grouping() ? groupItems(items, rootLabels()) : items.map((i) => groupItems([i], rootLabels())[0]);
+const originsText = (origins, max = 3) =>
+  (origins.length > max ? [...origins.slice(0, max), `+${origins.length - max}`] : origins).join(" · ");
+const copyLines = (group) =>
+  group.items.map((i) => `${originLabel(i, rootLabels())} · ${i.source?.relativePath ?? ""}`).join("\n");
+const copyBadge = (group) =>
+  group.count > 1
+    ? el("span", { class: "copy-badge" }, `×${group.count}`, el("span", { class: "sr" }, ` ${group.count} copias`))
+    : null;
 const status = (message) => {
   const n = document.querySelector("#status");
   if (n) n.textContent = message;
@@ -441,9 +463,6 @@ function bulkResultDialog(results) {
 }
 function organizeDialog() {
   const proposal = proposeOrganization(data.catalog, org());
-  const roles = new Map(data.catalog.map((i) => [i.id, i]));
-  const runtime = (id) =>
-    roles.get(id)?.source?.format === "claude-agents" ? "Claude Code" : "Codex";
   if (!proposal.items.length) {
     showDialog(
       "Organizar automáticamente",
@@ -470,13 +489,18 @@ function organizeDialog() {
       e.preventDefault();
       const ids = [...form.querySelectorAll("[name=role]:checked")].map((c) => c.value);
       if (!ids.length) return;
+      const copies = proposal.items.filter((i) => ids.includes(i.roleId)).reduce((n, i) => n + i.count, 0);
       if (await mutate("/api/organization", applyProposal(org(), proposal, ids), "PUT")) {
         showDialog(
           "Organización aplicada",
           el(
             "div",
             { class: "dialog-body" },
-            el("p", { role: "status" }, `Se colocaron ${countOf(ids.length, "agente", "agentes")} en sus edificios.`),
+            el(
+              "p",
+              { role: "status" },
+              `Se colocaron ${countOf(ids.length, "agente único", "agentes únicos")} (${countOf(copies, "copia", "copias")}) en sus edificios.`,
+            ),
             el("p", { class: "notice" }, "Si no es lo que querías, pulsa «Deshacer» en la cabecera para revertirlo."),
             button("Cerrar", closeDialog, "button primary"),
           ),
@@ -486,8 +510,10 @@ function organizeDialog() {
     },
   });
   const update = () => {
-    const n = form.querySelectorAll("[name=role]:checked").length;
-    summary.textContent = `${countOf(n, "agente elegido", "agentes elegidos")} de ${proposal.items.length}.`;
+    const boxes = [...form.querySelectorAll("[name=role]:checked")],
+      n = boxes.length,
+      copies = boxes.reduce((sum, c) => sum + Number(c.dataset.copies), 0);
+    summary.textContent = `${n} de ${countOf(proposal.items.length, "agente único", "agentes únicos")} elegidos · ${countOf(copies, "copia", "copias")}.`;
     submit.textContent = `Aplicar (${n})`;
     submit.disabled = n === 0;
   };
@@ -495,33 +521,43 @@ function organizeDialog() {
     el(
       "p",
       {},
-      "Propuesta para los agentes que todavía no tienen lugar. Cada uno va al edificio que mejor encaja por su nombre, especialidad o descripción; la razón se muestra debajo. Desmarca los que prefieras colocar a mano.",
+      "Propuesta para los agentes que todavía no tienen lugar. Las copias de un mismo agente van juntas al mismo edificio, el que mejor encaja por su nombre, especialidad o descripción; la razón se muestra debajo. Desmarca los que prefieras colocar a mano.",
     ),
     el(
       "p",
       { class: "hint" },
-      "No se cambia nada de lo ya colocado y no se crean vínculos con skills: esos siguen siendo manuales.",
+      "No se cambia nada de lo ya colocado y no se crean vínculos con skills: esos siguen siendo manuales. Si una copia ya tiene edificio, sus otras copias se proponen en el mismo.",
     ),
     selectAllBox(form, "role", update),
   );
   for (const space of org().spaces) {
     const items = proposal.items.filter((i) => i.spaceId === space.id);
     if (!items.length) continue;
+    const copies = items.reduce((n, i) => n + i.count, 0);
     form.append(
       el(
         "fieldset",
         { class: "check-list" },
-        el("legend", {}, `${space.name} (${items.length})`),
+        el("legend", {}, `${space.name} (${items.length}${copies > items.length ? ` · ${copies} copias` : ""})`),
         ...items.map((item) =>
           el(
             "label",
             { class: "check" },
-            el("input", { type: "checkbox", name: "role", value: item.roleId, checked: "" }),
+            el("input", {
+              type: "checkbox",
+              name: "role",
+              value: item.roleId,
+              "data-copies": String(item.count),
+              checked: "",
+            }),
             el(
               "div",
               {},
               el("strong", {}, item.name),
-              el("div", { class: "hint" }, `${runtime(item.roleId)} · ${item.reason}`),
+              item.count > 1
+                ? el("span", { class: "copy-badge" }, `×${item.count}`, el("span", { class: "sr" }, ` ${item.count} copias`))
+                : null,
+              el("div", { class: "hint" }, `${originsText(item.origins)} · ${item.reason}`),
             ),
           ),
         ),
@@ -867,12 +903,15 @@ function assignmentDialog(role, defaultSpace = "") {
   );
   showDialog("Dar un lugar a este rol", form);
 }
-function itemRow(item) {
-  return button(
-    "",
-    () => selectItem(item.id),
-    "inventory-row" + (prefs.selected === item.id ? " active" : ""),
-  ).appendChild(
+function itemRow(group) {
+  const item = group.primary,
+    row = button(
+      "",
+      () => selectItem(item.id),
+      "inventory-row" + (group.items.some((i) => i.id === prefs.selected) ? " active" : ""),
+    );
+  if (group.count > 1) row.title = copyLines(group);
+  row.appendChild(
     el(
       "span",
       {},
@@ -882,8 +921,9 @@ function itemRow(item) {
         item.kind === "role" ? "ROL" : "SKILL",
       ),
       el("strong", {}, item.name),
+      copyBadge(group),
       item.kind === "role"
-        ? el("span", { class: "live-slot", "data-live-role": item.id })
+        ? el("span", { class: "live-slot", "data-live-role": group.items.map((i) => i.id).join(" ") })
         : null,
       el(
         "span",
@@ -893,10 +933,13 @@ function itemRow(item) {
       el(
         "span",
         { class: "source-caption" },
-        item.source?.relativePath || "Origen no disponible",
+        group.count > 1
+          ? originsText(group.origins)
+          : item.source?.relativePath || "Origen no disponible",
       ),
     ),
-  ).parentElement;
+  );
+  return row;
 }
 function selectItem(id) {
   prefs.selected = id;
@@ -925,12 +968,22 @@ function openRoom(id) {
   const ids = new Set(roleIdsForSpace(org(), id)),
     items = visible()
       .filter((i) => i.kind === "role" && ids.has(i.id))
-      .sort((a, b) => a.name.localeCompare(b.name, "es"));
+      .sort((a, b) => a.name.localeCompare(b.name, "es")),
+    roleGroups = groupsOf(items);
   const skills = visible().filter(
-    (i) =>
-      i.kind === "skill" &&
-      org().skillLinks.some((l) => l.skillId === i.id && ids.has(l.roleId)),
-  );
+      (i) =>
+        i.kind === "skill" &&
+        org().skillLinks.some((l) => l.skillId === i.id && ids.has(l.roleId)),
+    ),
+    skillGroups = groupsOf(skills);
+  const stat = (kind, groups, flat, suffix) =>
+    el(
+      "span",
+      {},
+      el("b", {}, String(groups)),
+      ` ${unitLabel(kind, groups, flat > groups)}${suffix}`,
+      flat > groups ? ` · ${flat} copias` : "",
+    );
   const room = el(
     "div",
     { class: "room-body", "data-type": space.type },
@@ -940,8 +993,8 @@ function openRoom(id) {
       el(
         "p",
         { class: "room-stats" },
-        el("span", {}, el("b", {}, String(items.length)), " roles"),
-        el("span", {}, el("b", {}, String(skills.length)), " skills vinculadas"),
+        stat("role", roleGroups.length, items.length, ""),
+        stat("skill", skillGroups.length, skills.length, skillGroups.length === 1 ? " vinculada" : " vinculadas"),
       ),
       button("Renombrar", () => renameDialog(space), "button quiet"),
     ),
@@ -950,7 +1003,7 @@ function openRoom(id) {
     class: "room-floor",
     "aria-label": "Sala de agentes",
   });
-  if (!items.length)
+  if (!roleGroups.length)
     floor.append(
       el(
         "div",
@@ -964,21 +1017,27 @@ function openRoom(id) {
         button("Asignar un rol", () => chooseRole(id), "button primary"),
       ),
     );
-  for (const item of items) {
-    const card = button("", () => selectItem(item.id), "room-agent");
+  for (const group of roleGroups) {
+    const item = group.primary,
+      card = button("", () => selectItem(item.id), "room-agent");
     card.dataset.tone = String(toneOf(item.name));
-    const origin =
-      item.source?.format === "claude-agents" ? "Claude Code" : "Codex";
-    card.title = `${item.name} · ${origin}${item.specialty ? ` · ${item.specialty}` : ""}`;
+    card.title =
+      group.count > 1
+        ? `${item.name}${item.specialty ? ` · ${item.specialty}` : ""}\n${copyLines(group)}`
+        : `${item.name} · ${group.origins[0]}${item.specialty ? ` · ${item.specialty}` : ""}`;
+    // Node.append turns null into the text "null", so drop the badge slot of single copies.
     card.append(
-      el("span", { class: "portrait", "aria-hidden": "true" }, el("i")),
-      el("strong", {}, item.name),
-      el(
-        "span",
-        { class: "hint" },
-        item.specialty ? `${origin} · ${item.specialty}` : origin,
-      ),
-      el("span", { class: "live-slot", "data-live-role": item.id }),
+      ...[
+        el("span", { class: "portrait", "aria-hidden": "true" }, el("i")),
+        el("strong", {}, item.name),
+        el(
+          "span",
+          { class: "hint" },
+          [originsText(group.origins), item.specialty].filter(Boolean).join(" · "),
+        ),
+        copyBadge(group),
+        el("span", { class: "live-slot", "data-live-role": group.items.map((i) => i.id).join(" ") }),
+      ].filter(Boolean),
     );
     floor.append(card);
   }
@@ -1010,13 +1069,13 @@ function openRoom(id) {
       button("+ Crear proyecto", projectDialog, "button quiet"),
     ),
   );
-  if (skills.length)
+  if (skillGroups.length)
     room.append(
       el(
         "section",
         { class: "room-skills" },
         el("h3", {}, "Biblioteca vinculada"),
-        ...skills.map(itemRow),
+        ...skillGroups.map(itemRow),
       ),
     );
   if (space.type === "library" || org().spaces.indexOf(space) === 2)
@@ -1262,6 +1321,52 @@ function capabilities(item) {
   }
   return box;
 }
+// Every copy of the selected item's group (whole catalog, not only the current results), compared to the primary.
+function copiesSection(item) {
+  const key = groupKey(item),
+    group = groupItems(data.catalog.filter((i) => groupKey(i) === key), rootLabels())[0];
+  if (!group || group.count < 2) return null;
+  return el(
+    "section",
+    { class: "copies", "aria-label": `Copias (${group.count})` },
+    el("h3", {}, `Copias (${group.count})`),
+    el(
+      "p",
+      { class: "hint" },
+      group.identical
+        ? "Todas declaran los mismos metadatos."
+        : "Los metadatos declarados no coinciden en todas. Se compara la cabecera declarada, no el contenido del archivo.",
+    ),
+    ...group.items.map((copy) => {
+      const current = copy.id === item.id,
+        relation =
+          copy === group.primary
+            ? "principal"
+            : sameMetadata(copy, group.primary)
+              ? "mismos metadatos declarados"
+              : "metadatos distintos";
+      const row = button(
+        el(
+          "span",
+          {},
+          el(
+            "strong",
+            {},
+            [originLabel(copy, rootLabels()), rootLabels()[copy.source?.rootId]]
+              .filter((label, i, all) => label && all.indexOf(label) === i)
+              .join(" · "),
+          ),
+          el("span", { class: "mono source-caption" }, copy.source?.relativePath || "Ruta no disponible"),
+          el("span", { class: `copy-relation${relation === "metadatos distintos" ? " differs" : ""}` }, relation),
+        ),
+        () => selectItem(copy.id),
+        "copy-row" + (current ? " active" : ""),
+      );
+      if (current) row.setAttribute("aria-current", "true");
+      return row;
+    }),
+  );
+}
 function detail() {
   const container = document.querySelector("#detail");
   container.replaceChildren();
@@ -1373,6 +1478,8 @@ function detail() {
           : JSON.stringify(diagnostic),
       ),
     );
+  const copies = copiesSection(item);
+  if (copies) container.append(copies);
   container.append(capabilities(item));
   if (item.kind === "role") {
     container.append(
@@ -1465,8 +1572,8 @@ function clearFilters() {
 function renderContent() {
   const results = visible(),
     roles = results.filter((i) => i.kind === "role").length;
-  document.querySelector("#result-count").textContent =
-    `${roles} roles · ${results.length - roles} skills en resultados`;
+  document.querySelector("#result-count").textContent = resultsLabel(results, grouping());
+  refreshBadges();
   const chips = document.querySelector("#active-filters");
   chips.replaceChildren();
   for (const [k, v] of Object.entries(prefs.filters))
@@ -1503,6 +1610,7 @@ function renderContent() {
             onSpace: openRoom,
             onRole: selectItem,
             selectedSpace: prefs.space,
+            grouped: grouping(),
             onFallback: () => {
               // May fire during creation or later (context lost): never loop retries.
               failed = true;
@@ -1532,6 +1640,7 @@ function renderContent() {
           onSpace: openRoom,
           onRole: selectItem,
           selectedSpace: prefs.space,
+          grouped: grouping(),
         });
       } catch {
         stage.replaceChildren(
@@ -1628,8 +1737,8 @@ function renderContent() {
       const located = new Set(
           org().spaces.flatMap((s) => roleIdsForSpace(org(), s.id)),
         ),
-        unassigned = results.filter(
-          (i) => i.kind === "role" && !located.has(i.id),
+        unassigned = groupsOf(
+          results.filter((i) => i.kind === "role" && !located.has(i.id)),
         ).length;
       if (unassigned || roles === 0)
         stage.append(
@@ -1640,7 +1749,9 @@ function renderContent() {
               "h2",
               {},
               unassigned
-                ? `${unassigned} roles buscan su lugar`
+                ? unassigned === 1
+                  ? "1 rol busca su lugar"
+                  : `${unassigned} roles buscan su lugar`
                 : "Tu biblioteca ya está aquí",
             ),
             el(
@@ -1696,7 +1807,7 @@ function renderContent() {
           ? null
           : button("Cómo funciona esto", guideDialog, "button quiet"),
       );
-    else for (const item of results) list.append(itemRow(item));
+    else for (const group of groupsOf(results)) list.append(itemRow(group));
     stage.append(list);
   }
   const onboarding = stage.querySelector(".onboarding");
@@ -1714,6 +1825,16 @@ function renderContent() {
     );
   sceneSignature = null;
   refreshLive();
+}
+// Sidebar badges: roles per building, unique when copies are grouped (copies in the tooltip).
+function refreshBadges() {
+  const byId = new Map(data.catalog.map((i) => [i.id, i]));
+  document.querySelectorAll("[data-badge-space]").forEach((node) => {
+    const ids = roleIdsForSpace(org(), node.dataset.badgeSpace),
+      unique = grouping() ? groupItems(ids.map((id) => byId.get(id) ?? { id })).length : ids.length;
+    node.textContent = String(unique);
+    node.title = unique < ids.length ? `${unique} ${unitLabel("role", unique, true)} · ${ids.length} copias` : roleCountLabel(unique);
+  });
 }
 function render() {
   const sidebar = el(
@@ -1735,11 +1856,7 @@ function render() {
                 ["⌂", "⌂", "▤", "⚒", "✧", "◷"][i % 6],
               ),
               el("span", {}, s.name),
-              el(
-                "span",
-                { class: "space-badge" },
-                roleIdsForSpace(org(), s.id).length,
-              ),
+              el("span", { class: "space-badge", "data-badge-space": s.id }),
             ),
           ).parentElement,
       ),
@@ -1891,6 +2008,21 @@ function render() {
           { class: "results-line" },
           el("span", { id: "result-count" }),
           el(
+            "label",
+            { class: "group-switch", title: "Junta en una sola fila las copias del mismo agente o skill" },
+            el("input", {
+              type: "checkbox",
+              id: "group-copies",
+              ...(grouping() ? { checked: "" } : {}),
+              onchange: (e) => {
+                prefs.group = e.target.checked;
+                savePrefs();
+                renderContent();
+              },
+            }),
+            "Agrupar copias",
+          ),
+          el(
             "button",
             {
               type: "button",
@@ -1946,9 +2078,9 @@ const REASONS = {
   ambiguous: "varios roles comparten ese nombre",
   "no-match": "ninguna carpeta de proyecto coincide",
 };
-function roleChip(roleId) {
-  const sessions = liveMap.byRole[roleId];
-  if (!sessions?.length) return null;
+function roleChip(roleIds) {
+  const sessions = roleIds.split(" ").flatMap((id) => liveMap.byRole[id] ?? []);
+  if (!sessions.length) return null;
   const sources = [...new Set(sessions.map((s) => sourceLabel(s.source)))];
   return el(
     "span",

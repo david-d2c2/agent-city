@@ -44,7 +44,7 @@ Sin `--data-dir`, el módulo utiliza una carpeta dedicada de datos del usuario. 
 ## Primer recorrido
 
 1. **Conectar fuentes:** elige una sugerencia o introduce una carpeta concreta. Selecciona Roles o Skills y pulsa **Autorizar e importar**. Elegir una sugerencia solo rellena el formulario.
-2. **Lista:** busca una definición y consulta su descripción y procedencia. Las variantes con igual nombre mantienen identidades y rutas distintas.
+2. **Lista:** busca una definición y consulta su descripción y procedencia. Las copias de un mismo agente o skill (mismo nombre en Codex y en Claude Code, o en varias carpetas) se agrupan en una fila con una marca «×N» y sus orígenes; cada copia mantiene su identidad, su ruta y sus asignaciones, y la ficha las lista en «Copias».
 3. **Asignar edificio o proyecto:** coloca un agente en uno o varios espacios. Oficina y Casa son contextos de proyecto; Taller y Estudio agrupan especialidades. Las asignaciones explícitas permiten encontrar un proyecto dentro de su taller.
 4. **Vincular skill:** añade las habilidades que quieras relacionar con un agente. Son vínculos de organización personal, no una comprobación de compatibilidad operativa.
 5. **Ciudad:** entra en un edificio, selecciona un robot y consulta sus skills. La Biblioteca también permite explorar el catálogo completo sin asignar cada habilidad a un agente.
@@ -53,12 +53,21 @@ Sin `--data-dir`, el módulo utiliza una carpeta dedicada de datos del usuario. 
 
 La búsqueda distingue tipos, edificios, proyectos y especialidades declaradas en las fuentes. Normaliza mayúsculas y acentos. La vista de lista permite acceder a todos los elementos aunque el mapa solo muestre hasta tres personajes por edificio. Puedes acercar, alejar, desplazar y centrar el mapa.
 
+## Copias agrupadas y contadores
+
+Un mismo agente o skill suele existir varias veces: en Codex y en Claude Code, o en varias carpetas. Agent City las agrupa por tipo y nombre (sin distinguir mayúsculas, acentos ni separadores: «UX Researcher», «ux-researcher» y «UX_researcher» son el mismo). Los números cuentan agentes y skills únicos y muestran las copias aparte, por ejemplo «145 roles únicos (229 copias)»; si no hay repetidos, solo el número. Lo mismo vale para las insignias de los edificios, las estadísticas de cada sala y la etiqueta del edificio en la ciudad, que muestra el total real de roles aunque solo se dibujen tres figuras.
+
+- **«Agrupar copias»:** el interruptor junto al contador de resultados (activado por defecto, se recuerda entre sesiones) pasa a la lista plana con todas las copias.
+- **Ficha, «Copias (N)»:** cada copia con su origen, su ruta relativa y una etiqueta respecto a la copia principal: «mismos metadatos declarados» o «metadatos distintos». Se compara la cabecera que declara cada archivo, no su contenido: dos copias con los mismos metadatos pueden diferir en el cuerpo. Un clic abre esa copia.
+- **Salas:** una tarjeta por agente único, con «×N» y los orígenes; el tooltip lista el origen y la ruta de cada copia. La copia principal es la primera con descripción.
+- La agrupación se calcula en el navegador a partir del catálogo: no cambia lo guardado ni los archivos, y cada copia conserva su propio identificador, asignaciones y vínculos.
+
 Las asignaciones y los vínculos persisten tras reiniciar. **Deshacer** recupera cambios recientes de organización. Actualizar una fuente conserva la organización y distingue un archivo desaparecido de una lectura fallida.
 
 ## Poblar la ciudad en tres pasos
 
 1. **Conectar todo lo encontrado:** en el panel de fuentes, la ciudad busca en tu equipo las carpetas de agentes y skills de Claude Code (incluidos los plugins instalados), Codex, `~/.agents`, Hermes, Gemini, ZCode y OpenClaw, y muestra cuántas definiciones hay en cada una. Marcas las que quieras, confirmas y se importan de una vez. Las fuentes que ya estaban conectadas se omiten, y un fallo en una no detiene las demás.
-2. **Organizar automáticamente:** propone un edificio para cada agente sin asignar según las palabras de su nombre, su especialidad y el inicio de su descripción (Estudio, Taller, Biblioteca o Torre de control). Cada robot muestra el motivo, puedes desmarcar los que no te convenzan y aplicarlo. La propuesta nunca toca asignaciones existentes ni crea vínculos con skills. Todo es reversible con **Deshacer**. Es una heurística de palabras clave: revisa los motivos antes de aplicar.
+2. **Organizar automáticamente:** propone un edificio para cada agente único sin asignar según las palabras de su nombre, su especialidad y el inicio de su descripción (Estudio, Taller, Biblioteca o Torre de control). Se decide una vez por grupo de copias y todas las copias sin lugar van al mismo edificio, así que nunca se reparten entre edificios; si una copia ya estaba colocada, sus copias hermanas se proponen en ese mismo edificio («Copia de «X» ya colocada en…»). La lista muestra un agente por fila con «×N» y los recuentos como «N agentes únicos · M copias»; puedes desmarcar los que no te convenzan y aplicarlo. La propuesta nunca toca asignaciones existentes ni crea vínculos con skills. Todo es reversible con **Deshacer**. Es una heurística de palabras clave: revisa los motivos antes de aplicar.
 3. **Detectar proyectos:** indica una carpeta (por ejemplo `C:\Proyectos`) y la ciudad lista sus subcarpetas. Eliges cuáles son proyectos y si pertenecen a Oficina o a Casa; se crean con su ruta, de modo que la actividad en vivo ilumine el edificio correcto. Solo lee los nombres de las carpetas.
 
 Las carpetas que son enlaces o uniones (muy habituales en ZCode y OpenClaw, que apuntan a `~/.agents/skills`) no se siguen: sus skills entran por la carpeta original, sin duplicados.
@@ -80,6 +89,8 @@ Cada importación tiene límites: 2.000 definiciones, 20.000 entradas, profundid
 La ciudad se dibuja por defecto en 3D isométrico con WebGL (three.js 0.186.1, licencia MIT, incluido en `web/vendor/`; no se descarga nada al ejecutar). Seis edificios con volumen propio, robots por edificio, luces y sombras. Arrastra para mover; los botones acercan, alejan y centran. Los edificios se iluminan con la actividad real (ver más abajo) y no se mueven ni brillan sin eventos.
 
 El botón **3D / 2D** de los controles alterna con el mapa SVG anterior. Si el navegador no admite WebGL, o se pierde el contexto gráfico, la ciudad cambia sola a 2D. Los nombres de los edificios son botones reales, así que todo se puede usar con teclado, y la vista Lista sigue ofreciendo lo mismo en texto. Con `prefers-reduced-motion` no hay animaciones: solo un brillo fijo.
+
+La etiqueta de cada edificio indica cuántos roles únicos contiene (con «Agrupar copias» desactivado, cuántas copias); las figuras son como máximo tres, solo una muestra.
 
 Los edificios y robots son formas generadas con código, con estilo de maqueta de ciencia ficción, no modelos 3D fotorrealistas.
 
