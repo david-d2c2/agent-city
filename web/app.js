@@ -170,6 +170,16 @@ async function api(path, body, method = "POST") {
   } catch {
     throw Error("El servicio no ha devuelto una respuesta válida.");
   }
+  try {
+    if (response.ok) sessionStorage.removeItem("ac-reloaded");
+    // The browser session can be evicted (many page loads, a restarted city): reload once to get a new one.
+    else if (response.status === 403 && /sesión del navegador/.test(result.error || "") && !sessionStorage.getItem("ac-reloaded")) {
+      sessionStorage.setItem("ac-reloaded", "1");
+      location.reload();
+    }
+  } catch {
+    /* storage can be unavailable: the plain error below is enough */
+  }
   if (!response.ok)
     throw Error(
       response.status === 409
@@ -2421,6 +2431,11 @@ function hooksDialog() {
           el("span", { class: "mono" }, connect.hookScript),
         )
       : null,
+    el(
+      "p",
+      { class: "hint" },
+      "Seguridad: el fragmento ejecuta ese script en cada llamada de tus herramientas. Guárdalo en una carpeta que solo tu usuario pueda modificar (por ejemplo %USERPROFILE%\\.agent-city) y usa esa ruta en el fragmento; en carpetas compartidas, como C:\\DEV, otros usuarios del equipo podrían alterarlo.",
+    ),
   );
   const d = showDialog("Conectar hooks", body);
   d.classList.add("live-dialog");

@@ -26,6 +26,8 @@ MAX_NAME = 120
 DEEP_KEYS = ('allowed-tools', 'user-invocable', 'disable-model-invocation', 'version', 'license')
 AGENT_KEYS = ('tools', 'model')
 FIELDS = ('name', 'description', 'specialty')
+# Explicit bidi and zero-width controls can visually spoof a name (U+202E reverses everything after it).
+BIDI_CONTROLS = frozenset('​‌‍‎‏‪‫‬‭‮⁦⁧⁨⁩﻿')
 EXCLUDED_DIRECTORIES = {'.git', '.svn', 'node_modules', '__pycache__', '.venv', 'venv', '.local', 'data', 'logs', 'sessions', 'backups'}
 EXCLUDED_FILES = {'credentials.toml', 'secrets.toml', 'auth.toml', 'session.toml', 'config.toml'}
 
@@ -43,6 +45,9 @@ def approved_path(value):
     if not isinstance(value, str) or not value or len(value) > 4096:
         raise ValueError('Ruta de fuente inválida.')
     path = Path(os.path.abspath(value))
+    # Network (UNC) and device paths would make this process authenticate to a remote host: sources are local folders.
+    if str(path).startswith(('\\\\', '//')) or os.path.splitdrive(str(path))[0].startswith(('\\\\', '//')):
+        raise ValueError('Ruta de fuente inválida.')
     try:
         for part in (path, *path.parents):
             if linked(part):
@@ -59,7 +64,7 @@ def clean_string(value, required=False, limit=4000):
         return ''
     if not isinstance(value, str) or len(value) > limit:
         raise ValueError('Metadato de texto no compatible o demasiado largo.')
-    value = ''.join(c for c in value if c in '\n\t' or ord(c) >= 32).strip()
+    value = ''.join(c for c in value if (c in '\n\t' or ord(c) >= 32) and c not in BIDI_CONTROLS).strip()
     if required and not value:
         raise ValueError('Falta un nombre válido en los metadatos.')
     return value
@@ -122,10 +127,11 @@ def tool_list(value, block):
     if not value:
         items = []
         for row in block:
-            match = re.fullmatch(r'\s+-\s+(.*?)\s*', row)
-            if not match:
+            # No regular expression here: a long run of spaces made the old pattern quadratic and froze the server.
+            stripped = row.strip()
+            if len(row) > 1024 or not row[:1].isspace() or not stripped.startswith('-') or not stripped[1:2].isspace():
                 raise ValueError('Lista de herramientas no compatible.')
-            items.append(scalar(match.group(1)))
+            items.append(scalar(stripped[1:].strip()))
     elif value.startswith('['):
         if not value.endswith(']'):
             raise ValueError('Lista de herramientas incompleta.')
@@ -334,7 +340,7 @@ def scan(root_record):
                     try:
                         metadata, digest, details = read_metadata(path, root, root_record['format'])
                         item.update(metadata, digest=digest, validity='valid', diagnostics=[], details=details)
-                    except (OSError, ValueError, UnicodeError, tomllib.TOMLDecodeError):
+                    except (OSError, ValueError, UnicodeError, tomllib.TOMLDecodeError, RecursionError, MemoryError):
                         item.update(name='', description='', specialty='', digest='', details={}, validity='invalid', diagnostics=['Metadatos inválidos o no compatibles; revisa nombre, cabecera y límites.'])
                     result['items'].append(item)
         except (OSError, ValueError):

@@ -2,12 +2,11 @@
 import argparse
 import http.client
 import json
-import os
 from pathlib import Path
-import signal
 import sys
 import sqlite3
 import threading
+import time
 import webbrowser
 
 from .live import registry_file, remove_registry, write_registry
@@ -15,35 +14,43 @@ from .server import make_server
 from .store import Store, default_data_dir
 
 
-def city_running(port):
-    """True only when an Agent City answers on this loopback port."""
+def registry_info():
+    """(port, token) from the user-private registry, or None when absent or malformed."""
     try:
-        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=0.5)
-        conn.request('GET', '/favicon.ico')
-        return conn.getresponse().getheader('Server', '').startswith('AgentCity')
+        info = json.loads(registry_file().read_text(encoding='utf-8'))
+        port, token = info['port'], info['token']
+        if type(port) is int and isinstance(token, str) and token:
+            return port, token
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def city_call(method, port, path, token):
+    """Authenticated request to the local city; the HTTP status, or None when nothing answers."""
+    try:
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=1.5)
+        conn.request(method, path, headers={'Authorization': 'Bearer ' + token})
+        return conn.getresponse().status
     except (OSError, http.client.HTTPException):
-        return False
+        return None
+
+
+def city_running(port):
+    """True only when the city that published the registry token answers on this port (a look-alike cannot)."""
+    info = registry_info()
+    return bool(info) and info[0] == port and city_call('GET', port, '/api/ping', info[1]) == 204
 
 
 def stop_city():
-    """Stop the city recorded in the registry, but only after confirming it is really Agent City."""
-    try:
-        info = json.loads(registry_file().read_text(encoding='utf-8'))
-        port, pid = info['port'], info['pid']
-        if type(port) is not int or type(pid) is not int:
-            raise ValueError
-    except (OSError, ValueError, KeyError, TypeError):
+    """Ask the registered city to exit through its token-protected channel; no process is ever killed by pid."""
+    info = registry_info()
+    if not info or city_call('POST', info[0], '/api/shutdown', info[1]) != 204:
         return 'Agent City no está en marcha.'
-    if not city_running(port):
-        return 'Agent City no está en marcha.'
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        return 'No se pudo detener Agent City.'
-    try:
-        registry_file().unlink()
-    except OSError:
-        pass
+    for _ in range(30):  # give it a moment to close its listener
+        if city_call('GET', info[0], '/api/ping', info[1]) is None:
+            break
+        time.sleep(0.1)
     return 'Agent City se ha detenido.'
 
 

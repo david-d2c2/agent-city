@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 
-from .catalog import MAX_BYTES, MAX_DEFINITIONS, MAX_ENTRIES, approved_path, clean_string, normalized, scan
+from .catalog import BIDI_CONTROLS, MAX_BYTES, MAX_DEFINITIONS, MAX_ENTRIES, approved_path, clean_string, normalized, scan
 from .discover import discover_roots
 
 
@@ -37,7 +37,7 @@ def usage_name(value):
     if not isinstance(value, str):
         return None
     name = value.strip()[:USAGE_NAME_LIMIT].strip()
-    return None if not name or any(ord(char) < 32 or ord(char) == 127 for char in name) else name
+    return None if not name or any(ord(char) < 32 or ord(char) == 127 or char in BIDI_CONTROLS for char in name) else name
 
 
 def path_key(value):
@@ -189,7 +189,7 @@ class Store:
                         result.update(status='failed', reason='No se pudo leer la carpeta.', imported=0)
                     else:
                         result.update(status='ok', reason='Importación parcial: se omitieron enlaces o se alcanzó algún límite.' if added['status'] == 'partial' else '', imported=imported)
-            except (ValueError, TypeError, OSError) as error:
+            except Exception as error:  # one hostile or broken source must never abort the others
                 result.update(status='failed', reason=str(error) if isinstance(error, ValueError) else 'No se pudo leer la carpeta.', imported=0)
             results.append(result)
         return {**state, 'results': results}

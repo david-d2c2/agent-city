@@ -7,6 +7,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import threading
 import time
 from urllib.parse import urlsplit
 
@@ -26,6 +27,7 @@ class LocalHTTPServer(ThreadingHTTPServer):
 def make_server(store, port=4317, web_dir=None):
     web = Path(web_dir) if web_dir else Path(__file__).resolve().parent.parent / 'web'
     sessions = {}
+    sessions_lock = threading.Lock()  # handler threads mint, prune and read sessions concurrently
 
     class Handler(BaseHTTPRequestHandler):
         server_version = 'AgentCity'
@@ -63,13 +65,30 @@ def make_server(store, port=4317, web_dir=None):
                     pass
             self.respond(status, {'error': message})
 
-        def ingest(self):
-            # Hooks authenticate with the per-start bearer token; they never carry browser credentials.
+        def authorized(self):
+            # Hooks and the launcher authenticate with the per-start bearer token; they never carry browser credentials.
             if self.headers.get('Origin') is not None:
-                return self.error(403, 'Origen no permitido.')
+                self.error(403, 'Origen no permitido.')
+                return False
             supplied = self.headers.get('Authorization', '').encode('utf-8', 'replace')
             if not secrets.compare_digest(supplied, ('Bearer ' + self.server.ingest_token).encode('utf-8')):
-                return self.error(401, 'No autorizado.')
+                self.error(401, 'No autorizado.')
+                return False
+            return True
+
+        def control(self, path):
+            # Launcher control channel: proves this port is the city that published the registry token, and lets
+            # --stop ask it to exit instead of killing a pid read from a file.
+            if not self.authorized():
+                return
+            if path == '/api/ping':
+                return self.respond(204, b'')
+            self.respond(204, b'')
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+        def ingest(self):
+            if not self.authorized():
+                return
             try:
                 lengths = self.headers.get_all('Content-Length', [])
                 if self.headers.get('Transfer-Encoding') or len(lengths) != 1:
@@ -119,21 +138,25 @@ def make_server(store, port=4317, web_dir=None):
                 cookie = None
                 if path in ('/', '/index.html'):
                     stamp = time.monotonic()
-                    for key in list(sessions):
-                        if sessions[key][1] < stamp - 43200:
-                            del sessions[key]
-                    if len(sessions) >= 100:
-                        sessions.pop(next(iter(sessions)))
                     cookie = secrets.token_urlsafe(32)
-                    sessions[cookie] = (secrets.token_urlsafe(32), stamp)
+                    with sessions_lock:
+                        for key in list(sessions):
+                            if sessions[key][1] < stamp - 43200:
+                                del sessions[key]
+                        while len(sessions) >= 100:
+                            sessions.pop(next(iter(sessions)))
+                        sessions[cookie] = (secrets.token_urlsafe(32), stamp)
                 return self.respond(200, data, content_type, cookie)
             if not path.startswith('/api/'):
                 return self.error(404, 'Ruta no disponible.')
             if self.command == 'POST' and path == '/api/ingest':
                 return self.ingest()
+            if (self.command, path) in (('GET', '/api/ping'), ('POST', '/api/shutdown')):
+                return self.control(path)
             try:
                 cookies = SimpleCookie(self.headers.get('Cookie', ''))
-                session = sessions.get(cookies['agentcity'].value) if 'agentcity' in cookies else None
+                with sessions_lock:
+                    session = sessions.get(cookies['agentcity'].value) if 'agentcity' in cookies else None
             except Exception:
                 session = None
             request_origin = self.headers.get('Origin')
@@ -206,6 +229,8 @@ def make_server(store, port=4317, web_dir=None):
                 self.error(400, 'Solicitud inválida; revisa los campos y referencias.')
             except (OSError, sqlite3.Error):
                 self.error(500, 'No se pudo guardar o leer el estado local. Se conserva el último estado completo.')
+            except Exception:  # never drop the connection without an answer (e.g. RecursionError from a hostile file)
+                self.error(500, 'Error interno; se conserva el último estado completo.')
 
         def setup(self):
             super().setup()

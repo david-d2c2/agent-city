@@ -120,7 +120,7 @@ Límites: una sesión sin eventos durante 60 s deja de contar como activa (300 s
 
 El botón **Uso** de la cabecera abre «Uso real»: qué agentes y skills se han usado de verdad y cuáles no aparecen nunca. Muchos inventarios son enormes y el uso, minúsculo, así que esto ayuda a decidir qué conservar.
 
-**Qué se registra.** Cada lanzamiento de un subagente y cada llamada a la herramienta Skill que ven los hooks de Claude Code. Los contadores son diarios y agregados, en tu base local: nombre, tipo, día y número de veces. No se guardan sesiones, carpetas, prompts ni respuestas.
+**Qué se registra.** Cada lanzamiento de un subagente y cada llamada a la herramienta Skill que ven los hooks de Claude Code. Los contadores son diarios y agregados, en tu base local: nombre, tipo, día y número de veces. Cada contador lleva además el identificador interno del proyecto donde ocurrió (se deduce de la carpeta de trabajo y solo si coincide con un proyecto que tú registraste). No se guardan sesiones, rutas, prompts ni respuestas.
 
 **Cómo funciona con los hooks.** Es el mismo script de la actividad en vivo (`hooks/agent_city_hook.py`). Para los subagentes ya enviaba el nombre del agente. Para las skills envía un único dato más, el nombre de la skill de las llamadas a la herramienta Skill, y nada más de los argumentos de ninguna herramienta. **Para empezar a registrar skills tienes que actualizar la copia del hook** que usas con Claude Code (la ciudad nunca edita tus archivos de configuración); si todavía envía la versión anterior, el diálogo lo avisa y los agentes se siguen registrando.
 
@@ -143,6 +143,14 @@ npm test
 ```
 
 Ejecuta las pruebas de Python (`unittest`) y de Node (`node --test`) sin descargar dependencias.
+
+## Seguridad y límites de confianza
+
+Agent City está pensada para un equipo con **un solo usuario**. El servidor solo escucha en `127.0.0.1` y exige una sesión del navegador, comprobación de origen y token anti-CSRF; los hooks y `Detener.cmd` usan un token que solo existe en tu carpeta de usuario. Pero el bucle local de Windows lo comparten todos los usuarios del equipo, y ninguna de esas protecciones distingue a otro usuario que abra la misma dirección. En un equipo compartido (servidor de escritorio remoto, aula, PC familiar con varias cuentas), no la dejes en marcha.
+
+- **Dónde instalarla:** clónala dentro de tu perfil de usuario. Carpetas creadas en la raíz de `C:\` (como `C:\DEV`) suelen permitir escribir a «Usuarios autentificados»; con esos permisos, otro usuario podría modificar el script del hook (que se ejecuta en cada llamada de tus herramientas) o tu base de datos. Si ya está ahí, copia el hook a `%USERPROFILE%\.agent-city\` y apunta el fragmento de hooks a esa ruta, o restringe los permisos con `icacls`.
+- **Qué lee y qué no:** solo cabeceras de los archivos de agentes y skills que autorizas; las rutas de red (`\\servidor\...`) se rechazan para que el sistema no se autentique contra un equipo remoto.
+- **Archivos hostiles:** una definición mal formada o malintencionada se marca como inválida; no detiene la importación de las demás.
 
 ## Limitaciones
 
