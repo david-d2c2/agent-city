@@ -1,0 +1,11 @@
+{
+  "name": "agent-city",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Ciudad local para organizar agentes, skills y proyectos",
+  "scripts": {
+    "start": "python -m agent_city --open",
+    "test": "python -m unittest discover -s tests -v && node --test tests/model.test.mjs tests/city3d-layout.test.mjs"
+  }
+}
