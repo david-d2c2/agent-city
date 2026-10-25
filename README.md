@@ -2,9 +2,22 @@
 
 ![Agent City: una ciudad isométrica 3D donde cada edificio agrupa a tus agentes](assets/city.png)
 
-Una colonia de ciencia ficción para organizar agentes, skills y proyectos en tu equipo. Ciudad isométrica, interiores por salas y una vista de lista con buscador, usando la misma información.
+**Un mapa visual de todos tus agentes de IA y sus skills.** Encuentra, organiza y entiende lo que tienes instalado en Claude Code, Codex y otras herramientas, en una ciudad de ciencia ficción donde cada edificio agrupa a tus agentes. 100 % local, sin cuenta ni servidor externo. Licencia [MIT](LICENSE).
 
-**Inventario y organización, 100 % local.** Los personajes representan definiciones de agentes; no ejecutan tareas. No hace falta cuenta, servidor externo ni instalar paquetes. Licencia [MIT](LICENSE).
+*English: a local-first visual map of every AI agent and skill installed on your machine (Claude Code, Codex and more). Find, organize and understand them in an isometric sci-fi city. No account, no cloud, no dependencies.*
+
+## ¿Para qué sirve?
+
+Cuando trabajas con agentes de IA, las definiciones se acumulan en carpetas ocultas de cada herramienta: cientos de agentes y skills, nombres repetidos entre herramientas, y ninguna forma de verlos juntos. Acabas sin saber qué tienes, qué hace cada cosa ni dónde está.
+
+Agent City resuelve eso con un solo lugar:
+
+- **Inventario único:** conecta las carpetas de tus herramientas (solo lectura) y ves todos tus agentes y skills juntos, con su procedencia y lo que cada archivo declara.
+- **Búsqueda:** localiza al agente o skill que necesitas por nombre, especialidad, edificio o proyecto.
+- **Organización propia:** coloca cada agente en un edificio (Taller, Estudio, Biblioteca, Torre de control) y asócialo a tus proyectos, para saber con quién cuentas en cada trabajo. Todo es reversible.
+- **Actividad en vivo (opcional):** con unos hooks, los edificios se iluminan cuando una sesión de Claude Code o Codex está trabajando en un proyecto tuyo.
+
+Es para quien usa varios agentes y skills y quiere orden y visibilidad. **No es** un ejecutor ni un orquestador de agentes: los personajes representan definiciones, no lanzan tareas, y la ciudad nunca modifica tus archivos.
 
 ## Arrancar en Windows
 
