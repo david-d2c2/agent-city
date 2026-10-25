@@ -22,10 +22,15 @@ export function projectsForSpace(org, spaceId) {
   );
 }
 
+// Links and junctions are skipped on purpose (their content enters through the original folder), so a source whose
+// only note is «Enlace excluido: …» is complete and must not raise an alarm.
+const LINK_NOTE = /^Enlace excluido/;
 export function sourceIssues(roots) {
-  return roots.filter(
-    (root) => root.status !== "success" || root.diagnostics?.length,
-  );
+  return roots.filter((root) => {
+    const notes = root.diagnostics ?? [];
+    if (notes.some((note) => !LINK_NOTE.test(note))) return true;
+    return root.status !== "success" && !(root.status === "partial" && notes.length > 0);
+  });
 }
 
 export function roleIdsForSpace(org, spaceId) {

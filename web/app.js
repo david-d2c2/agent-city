@@ -915,7 +915,8 @@ function renameDialog(space) {
   );
   showDialog("Renombrar edificio", form);
 }
-function assignmentDialog(role, defaultSpace = "") {
+// `copies`: every copy of the same agent that should get the assignment (the picked group), the primary first.
+function assignmentDialog(role, defaultSpace = "", copies = [role]) {
   const space = select("space", org().spaces, defaultSpace, "Sin edificio");
   const project = select("project", org().projects, "", "Sin proyecto");
   const form = el(
@@ -931,19 +932,20 @@ function assignmentDialog(role, defaultSpace = "") {
         }
         if (
           await updateOrganization((o) => {
-            if (
-              !o.assignments.some(
-                (a) =>
-                  a.roleId === role.id &&
-                  (a.spaceId || "") === space.value &&
-                  (a.projectId || "") === project.value,
+            for (const copy of copies)
+              if (
+                !o.assignments.some(
+                  (a) =>
+                    a.roleId === copy.id &&
+                    (a.spaceId || "") === space.value &&
+                    (a.projectId || "") === project.value,
+                )
               )
-            )
-              o.assignments.push({
-                roleId: role.id,
-                ...(space.value ? { spaceId: space.value } : {}),
-                ...(project.value ? { projectId: project.value } : {}),
-              });
+                o.assignments.push({
+                  roleId: copy.id,
+                  ...(space.value ? { spaceId: space.value } : {}),
+                  ...(project.value ? { projectId: project.value } : {}),
+                });
           })
         ) {
           closeDialog();
@@ -951,7 +953,7 @@ function assignmentDialog(role, defaultSpace = "") {
         }
       },
     },
-    el("p", {}, role.name),
+    el("p", {}, role.name, copies.length > 1 ? ` · se asigna a las ${copies.length} copias` : ""),
     labeled("Edificio", space),
     labeled("Proyecto", project),
     el("p", { class: "form-error", role: "alert" }),
@@ -1208,6 +1210,27 @@ function openRoom(id) {
   showDialog(space.name, room, true);
   refreshRoleChips();
 }
+// One picker row per agent group (copies of the same agent collapse into «×N» and get the assignment together);
+// with «Agrupar copias» off every copy is listed on its own, as before.
+const pickerRow = (group, action) => {
+  const row = button(
+    el(
+      "span",
+      {},
+      el("strong", {}, group.primary.name),
+      copyBadge(group),
+      el(
+        "span",
+        { class: "source-caption" },
+        group.count > 1 ? originsText(group.origins) : originLabel(group.primary, rootLabels()),
+      ),
+    ),
+    action,
+    "inventory-row",
+  );
+  if (group.count > 1) row.title = copyLines(group);
+  return row;
+};
 function chooseRole(space) {
   const roles = data.catalog.filter((i) => i.kind === "role");
   const search = input("query", "Buscar un rol");
@@ -1215,13 +1238,13 @@ function chooseRole(space) {
   const list = el("div", { class: "picker-list" });
   const draw = () =>
     list.replaceChildren(
-      ...roles
-        .filter((i) =>
+      ...groupsOf(
+        roles.filter((i) =>
           i.name.toLocaleLowerCase().includes(search.value.toLocaleLowerCase()),
-        )
-        .map((i) =>
-          button(i.name, () => assignmentDialog(i, space), "inventory-row"),
         ),
+      ).map((group) =>
+        pickerRow(group, () => assignmentDialog(group.primary, space, group.items)),
+      ),
     );
   search.addEventListener("input", draw);
   draw();
@@ -1241,28 +1264,22 @@ function skillLinkDialog(role) {
   const search = input("query", "Buscar una skill por nombre");
   search.required = false;
   const list = el("div", { class: "picker-list" });
+  // Copies of the same skill collapse into one row; the link points at the group's primary copy.
   const draw = () =>
     list.replaceChildren(
-      ...data.catalog
-        .filter(
+      ...groupsOf(
+        data.catalog.filter(
           (i) =>
             i.kind === "skill" &&
             i.name
               .toLocaleLowerCase()
               .includes(search.value.toLocaleLowerCase()),
-        )
-        .map((i) =>
-          button(
-            el(
-              "span",
-              {},
-              el("strong", {}, i.name),
-              el(
-                "span",
-                { class: "source-caption" },
-                `${data.roots.find((root) => root.id === i.source?.rootId)?.label || i.source?.rootId || "Fuente desconocida"} · ${i.source?.relativePath || "Ruta no disponible"}`,
-              ),
-            ),
+        ),
+      )
+        .map((group) => [group, group.primary])
+        .map(([group, i]) =>
+          pickerRow(
+            group,
             async () => {
               if (
                 await updateOrganization((o) => {
@@ -1282,7 +1299,6 @@ function skillLinkDialog(role) {
                 selectItem(role.id);
               }
             },
-            "inventory-row",
           ),
         ),
     );
@@ -1584,7 +1600,12 @@ function detail() {
       el("h3", {}, "Sus lugares"),
       button(
         "+ Asignar edificio o proyecto",
-        () => assignmentDialog(item),
+        () =>
+          assignmentDialog(
+            item,
+            "",
+            grouping() ? data.catalog.filter((i) => groupKey(i) === groupKey(item)) : [item],
+          ),
         "button quiet",
       ),
     );

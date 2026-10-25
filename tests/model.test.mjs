@@ -38,6 +38,22 @@ test("source issues remain visible for partial, failed and diagnostic imports", 
     ["partial", "failed", "warning"],
   );
 });
+
+test("sources that only skipped links are not an incident, but any other note still is", () => {
+  const roots = [
+    { id: "links", status: "partial", diagnostics: ["Enlace excluido: uno", "Enlace excluido: dos"] },
+    { id: "links-ok", status: "success", diagnostics: ["Enlace excluido: uno"] },
+    { id: "links-and-limit", status: "partial", diagnostics: ["Enlace excluido: uno", "Se alcanzó el límite de 2000 definiciones."] },
+    { id: "partial-silent", status: "partial", diagnostics: [] },
+    { id: "pending", status: "pending", diagnostics: [] },
+    { id: "failed-links", status: "failed", diagnostics: ["Enlace excluido: uno"] },
+    { id: "no-notes-field", status: "success" },
+  ];
+  assert.deepEqual(
+    model.sourceIssues(roots).map((root) => root.id),
+    ["links-and-limit", "partial-silent", "pending", "failed-links"],
+  );
+});
 import {
   normalize,
   filterCatalog,
