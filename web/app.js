@@ -1946,7 +1946,30 @@ function renderContent() {
     );
   sceneSignature = null;
   refreshLive();
+  fitMapHeight();
 }
+// The 3D map takes the room left below it, so the whole colony and its controls stay in view even when banners
+// push it down; the camera refits through the canvas ResizeObserver. Never below 420px (the page scrolls then).
+function fitMapHeight() {
+  const map = document.querySelector(".map.map-3d"),
+    stage = document.querySelector("#stage");
+  // The stage keeps a 565px minimum for the 2D map and list; with a shorter 3D map the controls (pinned to the
+  // stage bottom) would end up below it, so the stage follows the map instead.
+  if (stage) stage.style.minHeight = map && !matchMedia("(max-width: 700px)").matches ? "0" : "";
+  if (!map) return;
+  if (matchMedia("(max-width: 700px)").matches) {
+    map.style.height = map.style.minHeight = "";
+    return;
+  }
+  const top = map.getBoundingClientRect().top + window.scrollY;
+  map.style.height = `${Math.max(420, Math.min(760, Math.round(window.innerHeight - top - 28)))}px`;
+  map.style.minHeight = "0";
+}
+let fitMapTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(fitMapTimer);
+  fitMapTimer = setTimeout(fitMapHeight, 80);
+});
 // Sidebar badges: roles per building, unique when copies are grouped (copies in the tooltip).
 function refreshBadges() {
   const byId = new Map(data.catalog.map((i) => [i.id, i]));

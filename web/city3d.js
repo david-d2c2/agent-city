@@ -1083,10 +1083,10 @@ function createCity(container, organization, visible, options, renderer, canvas)
     );
     const name = document.createElement("span");
     name.className = "label-3d-name";
-    name.textContent = d.name;
+    name.textContent = `Proyectos de ${d.name}`;
     const count = document.createElement("span");
     count.className = "label-3d-count";
-    count.textContent = projectsLabel(d.total);
+    count.textContent = `· ${d.total}`;
     Object.assign(count.style, { font: "400 10px/1.2 Segoe UI, sans-serif", opacity: "0.75" });
     const row = document.createElement("span");
     row.className = "label-3d-row";
