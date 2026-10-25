@@ -905,6 +905,12 @@ function selectItem(id) {
   renderContent();
   document.querySelector("#detail-heading")?.focus();
 }
+// Decorative identity only (eye and pad colour); it never signals state or activity.
+function toneOf(name) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) % 4;
+  return h;
+}
 function openRoom(id) {
   prefs.space = id;
   savePrefs();
@@ -917,7 +923,9 @@ function openRoom(id) {
   const space = org().spaces.find((s) => s.id === id);
   if (!space) return;
   const ids = new Set(roleIdsForSpace(org(), id)),
-    items = visible().filter((i) => i.kind === "role" && ids.has(i.id));
+    items = visible()
+      .filter((i) => i.kind === "role" && ids.has(i.id))
+      .sort((a, b) => a.name.localeCompare(b.name, "es"));
   const skills = visible().filter(
     (i) =>
       i.kind === "skill" &&
@@ -925,25 +933,23 @@ function openRoom(id) {
   );
   const room = el(
     "div",
-    { class: "room-body" },
+    { class: "room-body", "data-type": space.type },
     el(
       "div",
       { class: "room-toolbar" },
       el(
         "p",
-        {},
-        `${items.length} roles · ${skills.length} skills vinculadas en resultados`,
+        { class: "room-stats" },
+        el("span", {}, el("b", {}, String(items.length)), " roles"),
+        el("span", {}, el("b", {}, String(skills.length)), " skills vinculadas"),
       ),
       button("Renombrar", () => renameDialog(space), "button quiet"),
     ),
   );
-  const floor = el(
-    "section",
-    { class: "room-floor", "aria-label": "Sala de agentes" },
-    el("div", { class: "room-window", "aria-hidden": "true" }),
-    el("div", { class: "room-rug", "aria-hidden": "true" }),
-    el("div", { class: "room-plant", "aria-hidden": "true" }, "◉"),
-  );
+  const floor = el("section", {
+    class: "room-floor",
+    "aria-label": "Sala de agentes",
+  });
   if (!items.length)
     floor.append(
       el(
@@ -958,31 +964,47 @@ function openRoom(id) {
         button("Asignar un rol", () => chooseRole(id), "button primary"),
       ),
     );
-  for (const item of items)
-    floor.append(
-      button("", () => selectItem(item.id), "room-agent").appendChild(
-        el(
-          "span",
-          {},
-          el("span", { class: "portrait", "aria-hidden": "true" }),
-          el("strong", {}, item.name),
-          el("span", { class: "live-slot", "data-live-role": item.id }),
-          el("span", { class: "hint" }, item.specialty || "Rol local"),
-        ),
-      ).parentElement,
+  for (const item of items) {
+    const card = button("", () => selectItem(item.id), "room-agent");
+    card.dataset.tone = String(toneOf(item.name));
+    const origin =
+      item.source?.format === "claude-agents" ? "Claude Code" : "Codex";
+    card.title = `${item.name} · ${origin}${item.specialty ? ` · ${item.specialty}` : ""}`;
+    card.append(
+      el("span", { class: "portrait", "aria-hidden": "true" }, el("i")),
+      el("strong", {}, item.name),
+      el(
+        "span",
+        { class: "hint" },
+        item.specialty ? `${origin} · ${item.specialty}` : origin,
+      ),
+      el("span", { class: "live-slot", "data-live-role": item.id }),
     );
+    floor.append(card);
+  }
   room.append(
     floor,
     el(
       "div",
       { class: "room-projects" },
-      el("h3", {}, "Proyectos en este edificio"),
-      ...projectsForSpace(org(), id).map((p) =>
-        button(p.name, () => {
-          prefs.filters.project = p.id;
-          savePrefs();
-          closeDialog();
-          render();
+      el(
+        "h3",
+        {},
+        "Proyectos en este edificio",
+        el("span", { class: "count" }, String(projectsForSpace(org(), id).length)),
+      ),
+      el(
+        "div",
+        { class: "room-project-list", "aria-label": "Proyectos del edificio" },
+        ...projectsForSpace(org(), id).map((p) => {
+          const link = button(p.name, () => {
+            prefs.filters.project = p.id;
+            savePrefs();
+            closeDialog();
+            render();
+          });
+          link.title = p.name;
+          return link;
         }),
       ),
       button("+ Crear proyecto", projectDialog, "button quiet"),
@@ -1726,16 +1748,22 @@ function render() {
       "div",
       { class: "sidebar-projects" },
       el("p", { class: "eyebrow" }, "PROYECTOS"),
-      ...org().projects.map((p) =>
-        button(
-          p.name,
-          () => {
-            prefs.filters.project = p.id;
-            savePrefs();
-            render();
-          },
-          "project-link",
-        ),
+      el(
+        "div",
+        { class: "project-scroll", "aria-label": "Lista de proyectos" },
+        ...org().projects.map((p) => {
+          const link = button(
+            p.name,
+            () => {
+              prefs.filters.project = p.id;
+              savePrefs();
+              render();
+            },
+            "project-link",
+          );
+          link.title = p.name;
+          return link;
+        }),
       ),
       button("+ Nuevo proyecto", projectDialog, "button quiet"),
       button("Detectar proyectos", projectScanDialog, "button quiet"),
