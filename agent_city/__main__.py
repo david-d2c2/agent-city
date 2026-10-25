@@ -90,7 +90,12 @@ def main():
     url = 'http://127.0.0.1:' + str(server.server_address[1])
     print('Ciudad de agentes disponible en ' + url, flush=True)
     try:
-        write_registry(server.server_address[1], server.ingest_token)
+        # Hooks follow the registry: a second city (another port, a test copy) must not steal it from one that is alive.
+        other = registry_info()
+        if other and other[0] != server.server_address[1] and city_call('GET', other[0], '/api/ping', other[1]) == 204:
+            print('Aviso: ya hay otra ciudad recibiendo los hooks (puerto %d); esta no los recibirá.' % other[0], file=sys.stderr, flush=True)
+        else:
+            write_registry(server.server_address[1], server.ingest_token)
     except OSError:
         print('Aviso: no se pudo publicar el registro local; la actividad en vivo no estará disponible.', file=sys.stderr, flush=True)
     if args.open:

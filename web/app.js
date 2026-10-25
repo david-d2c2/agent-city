@@ -3,8 +3,8 @@ import {
   TRUTH_TIERS,
   USAGE_FILTERS,
   addProjectsFromFolders,
+  cleanPath,
   applyProposal,
-  buildingRoles,
   activeFilterTexts,
   buildingCounts,
   elapsedLabel,
@@ -43,6 +43,7 @@ import {
   uniqueAgentsBySpace,
   usageSummary,
   projectAgentStats,
+  projectUsedRoleIds,
 } from "./model.js";
 import { applyLive, renderCity } from "./scene.js";
 import { renderCity3D, webglAvailable } from "./city3d.js";
@@ -127,9 +128,21 @@ function filterByProject(id) {
   render();
 }
 const usageMode = () => (Object.hasOwn(USAGE_FILTERS, prefs.filters.usage) ? prefs.filters.usage : "");
+// Agents (every copy) that were only USED in a project also belong to its filter, like they count for its lot height.
+let projectUsedMemo = null;
+const projectUsedIds = () => {
+  if (projectUsedMemo?.catalog !== data.catalog || projectUsedMemo.org !== org() || projectUsedMemo.usage !== usage)
+    projectUsedMemo = {
+      catalog: data.catalog,
+      org: org(),
+      usage,
+      value: projectUsedRoleIds(org(), data.catalog, usage?.projectItems),
+    };
+  return projectUsedMemo.value;
+};
 // Group-level usage filter, applied after the plain filters; ignored (and explained) while there is no usage record.
 const visible = () => {
-  const items = filterCatalog(data.catalog, org(), prefs.filters);
+  const items = filterCatalog(data.catalog, org(), prefs.filters, { projectRoleIds: projectUsedIds() });
   return usageMode() && usageHasData(usage)
     ? filterByUsage(groupItems(items), usageMatched().matched, usageMode()).flatMap((g) => g.items)
     : items;
@@ -254,7 +267,8 @@ function showDialog(title, body, wide = false) {
   });
   document.body.append(dialog);
   dialog.showModal();
-  (dialog.querySelector("input,select,button") || dialog).focus();
+  // First control of the dialog body, not the header's «Cerrar ×» (which stays the fallback).
+  ([...dialog.querySelectorAll("input,select,textarea,button")].find((n) => !header.contains(n)) || dialog.querySelector("button") || dialog).focus();
   return dialog;
 }
 function labeled(label, control) {
@@ -661,7 +675,7 @@ function projectScanDialog() {
             e.preventDefault();
             error.textContent = "";
             try {
-              const result = await api("/api/projects/scan", { path: parent.value.trim() });
+              const result = await api("/api/projects/scan", { path: cleanPath(parent.value) });
               drawFolders(result);
             } catch {
               error.textContent =
@@ -867,7 +881,7 @@ function projectDialog() {
         const spaceIds = [...form.querySelectorAll("[name=space]:checked")].map(
           (c) => c.value,
         );
-        const projectPath = folder.value.trim();
+        const projectPath = cleanPath(folder.value);
         if (
           await updateOrganization((o) =>
             o.projects.push({
@@ -1547,7 +1561,10 @@ function detail() {
   );
   if (item.kind === "role")
     container.append(
-      el("div", { class: "live-slot", "data-live-role": item.id }),
+      el("div", {
+        class: "live-slot",
+        "data-live-role": (grouping() ? data.catalog.filter((i) => groupKey(i) === groupKey(item)) : [item]).map((i) => i.id).join(" "),
+      }),
     );
   if (selectionState(item.id, data.catalog, visible()) === "outside")
     container.append(
@@ -1705,11 +1722,12 @@ function renderContent() {
   refreshBadges();
   const chips = document.querySelector("#active-filters");
   chips.replaceChildren();
+  const projectStats = prefs.filters.project ? cityAgents().byProject[prefs.filters.project] : null;
   for (const [k, v] of Object.entries(prefs.filters))
     if (v)
       chips.append(
         button(
-          `${filterChipText(k, v, org())} ×`,
+          `${filterChipText(k, v, org())}${k === "project" && projectStats?.used > 0 ? " (asignados o usados)" : ""} ×`,
           () => {
             delete prefs.filters[k];
             savePrefs();
@@ -1728,10 +1746,14 @@ function renderContent() {
         ? `Solo lo que consta como usado desde ${usageSince(usage)}.`
         : `Sin uso registrado desde ${usageSince(usage)}: no consta que se haya usado en ese tiempo, lo que no equivale a que no se use.`;
   // A project nobody worked in reads as an all-zero city: say so instead of leaving it unexplained.
-  const projectNote = document.querySelector("#project-note"),
-    filtered = prefs.filters.project ? cityAgents().byProject[prefs.filters.project] : null;
-  projectNote.textContent =
-    filtered && filtered.agents === 0 ? "Este proyecto aún no tiene agentes asignados ni usados." : "";
+  const projectNote = document.querySelector("#project-note");
+  projectNote.textContent = !projectStats
+    ? ""
+    : projectStats.agents === 0
+      ? "Este proyecto aún no tiene agentes asignados ni usados."
+      : projectStats.used > 0
+        ? "Se muestran los agentes asignados o usados en este proyecto (los usados constan en el registro de uso por carpeta)."
+        : "";
   const stage = document.querySelector("#stage");
   city?.dispose?.();
   city = undefined;
@@ -2003,12 +2025,14 @@ window.addEventListener("resize", () => {
 });
 // Sidebar badges: roles per building, unique when copies are grouped (copies in the tooltip).
 function refreshBadges() {
-  const byId = new Map(data.catalog.map((i) => [i.id, i]));
+  const byId = new Map(data.catalog.map((i) => [i.id, i])),
+    shownItems = visible(),
+    filtersOn = hasActiveFilters(prefs.filters);
   document.querySelectorAll("[data-badge-space]").forEach((node) => {
     const ids = roleIdsForSpace(org(), node.dataset.badgeSpace),
       unique = grouping() ? groupItems(ids.map((id) => byId.get(id) ?? { id })).length : ids.length;
     const spaceIds = new Set(ids),
-      shown = buildingCounts(data.catalog, visible(), spaceIds, grouping(), hasActiveFilters(prefs.filters)),
+      shown = buildingCounts(data.catalog, shownItems, spaceIds, grouping(), filtersOn),
       filteredText = shown.shown < shown.total ? `${shown.shown} con los filtros activos` : "";
     node.replaceChildren(String(unique), filteredText ? el("span", { class: "sr" }, ` (${filteredText})`) : "");
     node.title =
@@ -2072,10 +2096,22 @@ function render() {
     "aria-label": "Buscar roles y skills",
     value: prefs.filters.query || "",
   });
-  search.addEventListener("input", () => {
+  // The text is stored at once; the (heavy) re-render waits for a pause in typing. Enter and clearing apply immediately.
+  let searchTimer = null;
+  const applySearch = () => {
+    clearTimeout(searchTimer);
     prefs.filters.query = search.value;
     savePrefs();
     renderContent();
+  };
+  search.addEventListener("input", () => {
+    prefs.filters.query = search.value;
+    clearTimeout(searchTimer);
+    if (!search.value) applySearch();
+    else searchTimer = setTimeout(applySearch, 120);
+  });
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") applySearch();
   });
   const filters = el("div", { class: "filter-row" }, search);
   for (const [key, label, options] of [
@@ -2245,7 +2281,9 @@ function render() {
 // ---- Live activity: polling, mapping, dialogs ----
 const POLL_MS = 1500,
   POLL_BACKOFF_MS = 5000;
+const POLL_FAILS_TO_DISCONNECT = 3; // consecutive failed polls before the last known activity is dropped
 let live = null,
+  pollFails = 0,
   liveMap = liveMapping(null),
   liveProjects = {},
   pollTimer = null,
@@ -2256,7 +2294,8 @@ const REASONS = {
   "no-match": "ninguna carpeta de proyecto coincide",
 };
 function roleChip(roleIds) {
-  const sessions = roleIds.split(" ").flatMap((id) => liveMap.byRole[id] ?? []);
+  // Every copy of a group carries the same session, so count each session once.
+  const sessions = [...new Set(roleIds.split(" ").flatMap((id) => liveMap.byRole[id] ?? []))];
   if (!sessions.length) return null;
   const sources = [...new Set(sessions.map((s) => sourceLabel(s.source)))];
   return el(
@@ -2280,7 +2319,11 @@ function updateLiveSummary() {
   node.dataset.active = String(observed && active > 0);
   node.replaceChildren(
     el("span", { class: "live-dot", "aria-hidden": "true" }),
-    observed ? `${active} activas` : "Sin actividad observada",
+    pollFails >= POLL_FAILS_TO_DISCONNECT
+      ? "Sin conexión con la ciudad"
+      : observed
+        ? `${active} activas`
+        : "Sin actividad observada",
   );
 }
 function fillNowBody(container) {
@@ -2288,7 +2331,9 @@ function fillNowBody(container) {
   container.replaceChildren();
   const sessions = Array.isArray(live?.sessions) ? live.sessions : [];
   const active = sessions.filter((s) => s?.active);
-  if (!live?.connected)
+  if (pollFails >= POLL_FAILS_TO_DISCONNECT)
+    container.append(el("p", {}, "Sin conexión con la ciudad: se muestra solo lo que llegue cuando vuelva a responder."));
+  else if (!live?.connected)
     container.append(
       el(
         "p",
@@ -2472,9 +2517,15 @@ async function pollLive() {
   let next = POLL_MS;
   try {
     live = await api("/api/live");
+    pollFails = 0;
     refreshLive();
   } catch {
     next = POLL_BACKOFF_MS;
+    // A dead city must not keep buildings lit: after a few failures forget the last snapshot (lights come from real events only).
+    if (++pollFails === POLL_FAILS_TO_DISCONNECT) {
+      live = null;
+      refreshLive();
+    }
   } finally {
     pollBusy = false;
     pollTimer = setTimeout(pollLive, next);
@@ -2503,7 +2554,7 @@ async function loadUsage() {
 const usageViewsChanged = () => {
   // The city only needs a rebuild when usage changed what sizes it (agents per project), not for every usage update.
   const cityChanged = prefs.view === "city" && !!data && citySignature(cityAgents()) !== renderedCitySignature;
-  if (prefs.filters.usage || prefs.selected || prefs.view === "list" || cityChanged) renderContent();
+  if (prefs.filters.usage || prefs.filters.project || prefs.selected || prefs.view === "list" || cityChanged) renderContent();
 };
 const usageChip = (key) => {
   const entry = usageMatched().matched.byKey.get(key);
@@ -2739,7 +2790,7 @@ function usageDialog() {
             () =>
               run("/api/usage/import-history", "Leyendo el historial… puede tardar unos segundos.", (r) => {
                 const i = r.imported ?? {};
-                return `Historial importado: ${countOf(i.agent ?? 0, "lanzamiento", "lanzamientos")} de agentes y ${countOf(i.skill ?? 0, "llamada", "llamadas")} a skills, en ${countOf(i.files ?? 0, "archivo leído", "archivos leídos")}${i.skipped ? ` (${i.skipped} omitidos)` : ""}${i.from ? `, del ${i.from} al ${i.to ?? "…"}` : ""}.`;
+                return `Historial importado: ${countOf(i.agent ?? 0, "lanzamiento", "lanzamientos")} de agentes y ${countOf(i.skill ?? 0, "llamada", "llamadas")} a skills, en ${countOf(i.files ?? 0, "archivo leído", "archivos leídos")}${i.skipped ? ` (${i.skipped} omitidos)` : ""}${i.from ? `, del ${i.from} al ${i.to ?? "…"}` : ""}.${i.partial === true ? ` Importación parcial: se alcanzó el límite de tiempo o de archivos.${i.replaced === false ? " No se ha reemplazado el historial guardado." : ""}` : ""}`;
               }),
             "import",
           )

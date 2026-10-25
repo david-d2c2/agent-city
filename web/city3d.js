@@ -2,7 +2,7 @@
 // Layout data lives in city3d-layout.js (pure). The renderer/canvas is a module-level
 // singleton so re-rendering the app never accumulates WebGL contexts.
 import * as THREE from "./vendor/three.module.js";
-import { buildingCounts, buildingRoles, projectsForSpace, roleIdsForSpace } from "./model.js";
+import { buildingCounts, buildingRoles, groupKey, projectsForSpace, roleIdsForSpace } from "./model.js";
 import {
   BUILDINGS,
   GROUND,
@@ -821,10 +821,19 @@ function createCity(container, organization, visible, options, renderer, canvas)
     const { total, shown: roles } = buildingRoles(visible, idSet, grouped);
     // With filters active the label reads «X de Y roles» so a building the filters empty never looks broken.
     const countText = buildingCounts(options.catalog ?? visible, visible, idSet, grouped, options.filtered === true).text;
+    // A drawn figure stands for its whole group: it lights when ANY copy of it (in this building's view) is live.
+    const copyIds = new Map(
+      roles.map((r) => [
+        r.id,
+        grouped
+          ? visible.filter((v) => v.kind === "role" && idSet.has(v.id) && groupKey(v) === groupKey(r)).map((v) => v.id)
+          : [r.id],
+      ]),
+    );
     buildings.push({
       space, type, spec, group, glow, effects, beamMat, arc, arcMat, sel, selMat,
       h: pb.h, grow: pb.grow, agents: pb.agents, builtTop, countText,
-      roles, total, light: null, state: null, label: null, labelW: 90, labelH: 36,
+      roles, copyIds, total, light: null, state: null, label: null, labelW: 90, labelH: 36,
     });
   });
 
@@ -864,7 +873,7 @@ function createCity(container, organization, visible, options, renderer, canvas)
       scene.add(group);
       pickRoots.push(group);
       robots.push({
-        role, group, visorMat, building: b, index: i,
+        role, ids: b.copyIds.get(role.id), group, visorMat, building: b, index: i,
         slot: slots[i], goal: { x: path[1].x, z: path[1].z + (i - 1) * 0.9 },
         state: null, hover: false, button: null,
       });
@@ -1070,11 +1079,13 @@ function createCity(container, organization, visible, options, renderer, canvas)
   });
 
   // ---- district signs, «+N más» markers, lot tooltip and live chips.
-  // None of them is a keyboard target on purpose: the sidebar project list and the list view are the equivalent.
+  // None of them is a keyboard target on purpose (tabindex -1: still clickable): the sidebar project list and the list
+  // view are the equivalent, and the building labels already name the same places.
   const projectsLabel = (n) => `${n} ${n === 1 ? "proyecto" : "proyectos"}`;
   const signs = plan.districts.map((d) => {
     const label = document.createElement("button");
     label.type = "button";
+    label.tabIndex = -1;
     label.className = "label-3d district-sign" + (d.spaceId === selectedId ? " selected" : "");
     label.dataset.districtSpaceId = d.spaceId;
     label.setAttribute(
@@ -1173,8 +1184,7 @@ function createCity(container, organization, visible, options, renderer, canvas)
       }
     }
     for (const r of robots) {
-      const sessions = liveData.byRole[r.role.id];
-      const list = Array.isArray(sessions) ? sessions : [];
+      const list = r.ids.flatMap((id) => (Array.isArray(liveData.byRole[id]) ? liveData.byRole[id] : []));
       r.state = !list.length
         ? null
         : list.some((s) => s?.state !== "waiting")

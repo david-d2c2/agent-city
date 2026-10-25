@@ -173,7 +173,8 @@ class IngestProjectTests(base.ServerCase):
     def test_a_resolver_failure_never_fails_the_hook(self):
         with mock.patch.object(self.store, 'project_for_cwd', side_effect=sqlite3.OperationalError('boom')):
             self.assertEqual(self.ingest({'hook_event_name': 'PreToolUse', 'tool_name': 'Skill', 'skill': 'x', 'cwd': PROJECT_ROOT}), 204)
-        self.assertEqual(self.rows(), [])
+        # The count survives; only the project attribution is lost.
+        self.assertEqual(self.rows(), [('skill', 'x', '', 1)])
         self.assertEqual(len(self.server.live.snapshot()['sessions']), 1)
 
 
@@ -293,6 +294,7 @@ class ImportProjectTests(base.UsageCase):
         self.transcript('p/a.jsonl', lines)
         self.store.record_usage('claude-code', 'skill', 'x', day='2026-03-12', project='p1')
         self.run_import()
+        # 03-12 was counted live (same call, same project): history adds nothing for that day.
         self.assertEqual(self.project_counts(), {('2026-03-10', 'skill', 'x', 'p1'): 1, ('2026-03-11', 'skill', 'x', 'p1'): 1})
         self.assertEqual(self.store.usage_summary(today='2026-03-20')['projectItems'][0]['total'], 3)
 

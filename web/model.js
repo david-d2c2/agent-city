@@ -45,16 +45,19 @@ export function roleIdsForSpace(org, spaceId) {
     ),
   ];
 }
-export function filterCatalog(catalog, org, filters = {}) {
+// extra.projectRoleIds: {projectId: iterable of role ids} that count for a project besides its assignments
+// (the copies of agents only USED in it), so the filter matches the same agents that give a lot its height.
+export function filterCatalog(catalog, org, filters = {}, extra = {}) {
   const spaceRoles = filters.space
     ? new Set(roleIdsForSpace(org, filters.space))
     : null;
   const projectRoles = filters.project
-    ? new Set(
-        org.assignments
+    ? new Set([
+        ...org.assignments
           .filter((a) => a.projectId === filters.project)
           .map((a) => a.roleId),
-      )
+        ...(extra?.projectRoleIds?.[filters.project] ?? []),
+      ])
     : null;
   const belongs = (item, roles) =>
     !roles ||
@@ -185,16 +188,20 @@ export function roleCapabilities(item) {
 }
 
 // ---- Live activity mapping (pure; sessions come from outside, never trusted) ----
-const pathKey = (value) => {
-  const text = String(value ?? "")
-    .replace(/\\/g, "/")
-    .toLowerCase()
-    .trim();
+// Windows «Copy as path» wraps the path in double quotes; one surrounding pair is dropped (saved paths stay unquoted).
+export const cleanPath = (value) => {
+  const text = String(value ?? "").trim();
+  return text.length > 1 && text.startsWith('"') && text.endsWith('"') ? text.slice(1, -1).trim() : text;
+};
+// Comparison key: case-insensitive, «\» = «/», trailing separators ignored, quotes and outer spaces dropped.
+export const pathKey = (value) => {
+  const text = cleanPath(value).replace(/\\/g, "/").toLowerCase();
   return text.length > 1 ? text.replace(/\/+$/, "") : text;
 };
 export function projectForCwd(org, cwd) {
   const target = pathKey(cwd);
   if (!target) return null;
+  // Strictly longer wins, so two projects with the same path resolve to the FIRST one in organization order.
   let best = null,
     bestLength = 0;
   for (const project of org?.projects ?? []) {
@@ -265,13 +272,15 @@ export function liveMapping(live, catalog, org) {
             !r.source?.format ||
             r.source.format === runtimeFormat),
       );
-      if (matches.length > 1) {
+      // Copies of one agent (same group) are one match: every copy id gets the session and their buildings are united.
+      // Only roles of DIFFERENT groups sharing the name are ambiguous.
+      if (new Set(matches.map(groupKey)).size > 1) {
         out.unassigned.push({ session, reason: "ambiguous" });
         continue;
       }
-      if (matches.length === 1) {
-        (out.byRole[matches[0].id] ??= []).push(session);
-        const spaceIds = roleSpaceIds(org, matches[0].id);
+      if (matches.length) {
+        for (const m of matches) (out.byRole[m.id] ??= []).push(session);
+        const spaceIds = knownSpaces(org, matches.flatMap((m) => roleSpaceIds(org, m.id)));
         if (spaceIds.length) {
           light(spaceIds, session);
           continue;
@@ -294,13 +303,14 @@ export const sourceLabel = (source) =>
 
 // ---- Duplicate grouping (pure). Copies of one logical agent/skill keep their own ids, assignments and links;
 // groups are derived in the browser from the catalog and never stored. ----
-const WORD_BREAKS = /[^\p{L}\p{N}\p{M}]+/gu; // \p{M}: marks of non-Latin scripts are not separators
+// \p{M}: marks of non-Latin scripts are not separators. «+» and «#» belong to the word: «C++ Pro» ≠ «C# Pro» ≠ «C Pro».
+const WORD_BREAKS = /[^\p{L}\p{N}\p{M}+#]+/gu;
 const isValid = (item) =>
   !!item && typeof item === "object" && (item.validity == null || item.validity === "valid");
 // Same kind + same name once case, accents and separators ("UX Researcher", "ux-researcher") are ignored.
-// Invalid items and empty names never merge with anything.
+// Only invalid items (no usable name) and empty names stand alone; a «missing» copy keeps its name and groups with the rest.
 export function groupKey(item) {
-  const words = isValid(item) ? normalize(item.name).replace(WORD_BREAKS, " ").trim() : "";
+  const words = item && typeof item === "object" && item.validity !== "invalid" ? normalize(item.name).replace(WORD_BREAKS, " ").trim() : "";
   return words ? `${item.kind}:${words}` : `id:${item?.id}`;
 }
 const RUNTIME_LABELS = { "claude-agents": "Claude Code", roles: "Codex" };
@@ -345,11 +355,6 @@ export const unitLabel = (kind, n, unique = false) => {
     noun = skill ? (one ? "skill" : "skills") : one ? "rol" : "roles";
   return unique ? `${noun} ${skill ? (one ? "única" : "únicas") : one ? "único" : "únicos"}` : noun;
 };
-// «145 roles únicos · 229 copias», or plain «145 roles» when nothing repeats.
-export function countLabel(kind, { unique, copies }) {
-  const dup = copies > unique;
-  return `${fmt(unique)} ${unitLabel(kind, unique, dup)}${dup ? ` · ${fmt(copies)} copias` : ""}`;
-}
 // Results line: «145 roles únicos (229 copias) · 471 skills únicas (1.647 copias) en resultados».
 export function resultsLabel(items, grouped = true) {
   const part = (kind) => {
@@ -715,18 +720,44 @@ export function uniqueAgentsBySpace(org, catalog) {
   }
   return out;
 }
-// projectItems: GET /api/usage `projectItems` (may be missing). Returns {projectId: {agents, assigned, used, lastAt}}
-// for every project of the organization; lastAt is the latest recorded use of anything in that project.
-export function projectAgentStats(org, catalog, projectItems) {
-  const roles = roleItems(catalog);
-  const byId = new Map(roles.map((i) => [i.id, i]));
-  const groups = groupItems(roles);
+// Per project, the group keys of agents with recorded use in it (projectItems: GET /api/usage `projectItems`, may be missing).
+function usedKeysByProject(groups, projectItems) {
   const rows = new Map();
   for (const row of Array.isArray(projectItems) ? projectItems : []) {
-    if (!row || typeof row.projectId !== "string") continue;
+    if (!row || typeof row.projectId !== "string" || row.kind !== "agent") continue;
     if (!rows.has(row.projectId)) rows.set(row.projectId, []);
     rows.get(row.projectId).push(row);
   }
+  const out = new Map();
+  for (const [id, mine] of rows) {
+    const used = new Set();
+    for (const [key, entry] of matchUsage(groups, mine).byKey) if (entry.total > 0) used.add(key);
+    out.set(id, used);
+  }
+  return out;
+}
+// Role ids (every copy of each used group) that count for a project only because they were USED in it. They feed
+// filterCatalog's extra.projectRoleIds so the project filter matches the agents that give the lot its height.
+export function projectUsedRoleIds(org, catalog, projectItems) {
+  const groups = groupItems(roleItems(catalog));
+  const usedKeys = usedKeysByProject(groups, projectItems);
+  const out = {};
+  for (const project of org?.projects ?? []) {
+    const used = usedKeys.get(project.id);
+    if (used?.size) out[project.id] = groups.filter((g) => used.has(g.key)).flatMap((g) => g.items.map((i) => i.id));
+  }
+  return out;
+}
+// Returns {projectId: {agents, assigned, used, lastAt}} for every project of the organization; lastAt is the latest
+// recorded use of anything in that project.
+export function projectAgentStats(org, catalog, projectItems) {
+  const roles = roleItems(catalog);
+  const byId = new Map(roles.map((i) => [i.id, i]));
+  const usedKeys = usedKeysByProject(groupItems(roles), projectItems);
+  const lastUse = new Map();
+  for (const row of Array.isArray(projectItems) ? projectItems : [])
+    if (row && typeof row.lastAt === "string" && row.lastAt > (lastUse.get(row.projectId) ?? ""))
+      lastUse.set(row.projectId, row.lastAt);
   const assigned = new Map();
   for (const a of org?.assignments ?? []) {
     const item = a?.projectId ? byId.get(a.roleId) : null;
@@ -736,17 +767,13 @@ export function projectAgentStats(org, catalog, projectItems) {
   }
   const out = {};
   for (const project of org?.projects ?? []) {
-    const mine = rows.get(project.id) ?? [];
-    const used = new Set();
-    for (const [key, entry] of matchUsage(groups, mine.filter((r) => r.kind === "agent")).byKey)
-      if (entry.total > 0) used.add(key);
+    const used = usedKeys.get(project.id) ?? new Set();
     const both = new Set([...(assigned.get(project.id) ?? []), ...used]);
-    const lastAt = mine.reduce((m, r) => (typeof r.lastAt === "string" && r.lastAt > m ? r.lastAt : m), "");
     out[project.id] = {
       agents: both.size,
       assigned: assigned.get(project.id)?.size ?? 0,
       used: used.size,
-      lastAt: lastAt || null,
+      lastAt: lastUse.get(project.id) || null,
     };
   }
   return out;

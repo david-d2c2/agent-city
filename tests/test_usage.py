@@ -334,7 +334,7 @@ class ImportTests(UsageCase):
         self.assertEqual(self.counts(), {
             ('2026-03-10', 'skill', 'frontend-design'): 2, ('2026-03-10', 'agent', 'Explore'): 1, ('2026-03-10', 'agent', 'Plan'): 1,
             ('2026-03-11', 'skill', 'plug:other'): 1, ('2026-03-12', 'agent', 'Explore'): 1})
-        self.assertEqual(result, {'agent': 3, 'skill': 3, 'files': 3, 'skipped': 0, 'from': '2026-03-10', 'to': '2026-03-12', 'partial': False})
+        self.assertEqual(result, {'agent': 3, 'skill': 3, 'files': 3, 'skipped': 0, 'from': '2026-03-10', 'to': '2026-03-12', 'partial': False, 'replaced': True})
 
     def test_zulu_timestamps_become_local_days(self):
         stamp = '2026-03-10T23:30:00.000Z'
@@ -404,22 +404,32 @@ class ImportTests(UsageCase):
         self.run_import()
         self.assertEqual(self.counts(), {('2026-03-10', 'skill', 'y'): 1})
 
-    def test_history_stops_before_the_first_live_day(self):
+    def test_history_only_adds_what_live_recording_did_not_see(self):
         calls = [call('Skill', 'x', 't' + str(day)) for day in (10, 11, 12, 13)]
         self.transcript('p/a.jsonl', [line([block], local_ts('2026-03-' + str(day))) for block, day in zip(calls, (10, 11, 12, 13))])
         self.store.record_usage('claude-code', 'skill', 'x', day='2026-03-12')
         result = self.run_import()
-        self.assertEqual(self.counts(), {('2026-03-10', 'skill', 'x'): 1, ('2026-03-11', 'skill', 'x'): 1})
-        self.assertEqual((result['skill'], result['from'], result['to']), (2, '2026-03-10', '2026-03-11'))
+        # 03-12 was already counted live, 03-13 happened while nothing was recording: history keeps it.
+        self.assertEqual(self.counts(), {('2026-03-10', 'skill', 'x'): 1, ('2026-03-11', 'skill', 'x'): 1, ('2026-03-13', 'skill', 'x'): 1})
+        self.assertEqual((result['skill'], result['from'], result['to']), (3, '2026-03-10', '2026-03-13'))
         row = self.items(today='2026-03-20')[('skill', 'x')]
-        self.assertEqual((row['total'], row['lastAt']), (3, '2026-03-12'))
-        # A re-run keeps the same cut.
+        self.assertEqual((row['total'], row['lastAt']), (4, '2026-03-13'))
+        # A re-run keeps the same result.
         self.run_import()
-        self.assertEqual(len(self.counts()), 2)
+        self.assertEqual(len(self.counts()), 3)
 
-    def test_everything_live_leaves_no_history(self):
+    def test_live_counts_are_subtracted_per_day_and_name_across_projects(self):
+        stamp = local_ts('2026-03-12')
+        self.transcript('p/a.jsonl', [line([call('Skill', 'x', 't1'), call('Skill', 'x', 't2'), call('Skill', 'x', 't3')], stamp)])
+        self.store.record_usage('claude-code', 'skill', 'x', day='2026-03-12', project='')
+        self.store.record_usage('claude-code', 'skill', 'x', day='2026-03-12', project='p9')
+        self.run_import()
+        self.assertEqual(self.counts(), {('2026-03-12', 'skill', 'x'): 1})
+        self.assertEqual(self.items(today='2026-03-20')[('skill', 'x')]['total'], 3)
+
+    def test_everything_already_counted_live_leaves_no_history(self):
         self.transcript('p/a.jsonl', [line([call('Skill', 'x')], local_ts('2026-03-10'))])
-        self.store.record_usage('claude-code', 'skill', 'x', day='2026-03-01')
+        self.store.record_usage('claude-code', 'skill', 'x', day='2026-03-10')
         result = self.run_import()
         self.assertEqual((self.counts(), result['skill'], result['from'], result['to']), ({}, 0, None, None))
         self.assertEqual(self.store.usage_summary(today='2026-03-20')['history']['from'], None)
@@ -440,7 +450,8 @@ class ImportTests(UsageCase):
         result = self.run_import(max_files=2)
         self.assertEqual((result['files'] + result['skipped'], result['partial']), (2, True))
         result = self.run_import(budget_seconds=-1)
-        self.assertEqual((result['files'], result['partial'], self.counts()), (0, True, {}))
+        # A partial run never wipes the complete import made just before.
+        self.assertEqual((result['files'], result['partial'], result['replaced'], len(self.counts())), (0, True, False, 3))
         result = self.run_import()
         self.assertEqual((result['files'], result['partial'], len(self.counts())), (4, False, 4))
         stored = self.store.usage_summary(today='2026-03-20')['history']

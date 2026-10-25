@@ -2374,7 +2374,9 @@ fieldset {
   scrollbar-color: #46636d transparent;
 }
 @media (min-width: 701px) {
-  /* The sidebar never sets the page height: the list fills what is left and scrolls. */
+  /* The sidebar never sets the page height: the list fills what is left and scrolls. The project block keeps the room of
+     its eyebrow and buttons (min-height auto) and only the list (flex-basis 0, 96px floor) is flexible, so nothing
+     overlaps the footer at any height; the sidebar itself scrolls as the last resort. */
   .sidebar {
     contain: size;
     overflow-y: auto;
@@ -2383,14 +2385,18 @@ fieldset {
     display: flex;
     flex: 1 1 auto;
     flex-direction: column;
-    min-height: 0;
+    min-height: auto;
     margin-top: 22px;
     padding-top: 18px;
   }
   .project-scroll {
-    flex: 1 1 auto;
-    min-height: 120px;
+    flex: 1 1 0;
+    min-height: 96px;
     max-height: 680px;
+  }
+  .sidebar-projects > .button,
+  .sidebar-bottom {
+    flex-shrink: 0;
   }
   .sidebar {
     padding-top: 24px;

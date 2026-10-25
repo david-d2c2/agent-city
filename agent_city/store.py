@@ -42,7 +42,10 @@ def usage_name(value):
 
 def path_key(value):
     """Comparable form of a folder path; mirrors pathKey in web/model.js (case, slashes and trailing separators ignored)."""
-    text = str(value or '').replace('\\', '/').lower().strip()
+    text = str(value or '').strip()
+    if len(text) > 1 and text[0] == text[-1] == '"':  # Windows «Copy as path» wraps the path in double quotes
+        text = text[1:-1].strip()
+    text = text.replace('\\', '/').lower().strip()
     return text.rstrip('/') if len(text) > 1 else text
 
 
@@ -330,8 +333,12 @@ class Store:
             if self._project_paths is None or self._project_paths[0] != stamp:
                 keys = [(path_key(project.get('path')), project['id']) for project in self._load()['organization']['projects']]
                 self._project_paths = (stamp, [(key, identity) for key, identity in keys if key and key != '/'])
-            best = max(((len(key), identity) for key, identity in self._project_paths[1] if target == key or target.startswith(key + '/')), default=(0, ''))
-        return best[1]
+            # Longest folder wins; on a tie the first project in organization order does (the browser picks the same one).
+            best_length, best_identity = 0, ''
+            for key, identity in self._project_paths[1]:
+                if len(key) > best_length and (target == key or target.startswith(key + '/')):
+                    best_length, best_identity = len(key), identity
+        return best_identity
 
     # Real usage: daily counters per (source, kind, name). Only names and counts are stored, never content.
     def _meta(self, key):
@@ -388,21 +395,43 @@ class Store:
                 'projectItems': [{'projectId': project, 'kind': kind, 'name': name, 'total': total, 'last7': week, 'last30': month, 'lastAt': last} for project, kind, name, total, week, month, last in per_project],
             }
 
-    def replace_usage_history(self, counts, files, skipped, today=None, imported_at=None):
+    def has_usage_history(self):
+        with self.lock:
+            return bool(json.loads(self._meta('history') or 'null'))
+
+    def replace_usage_history(self, counts, files, skipped, today=None, imported_at=None, replace=True):
         """Swap the imported history rows for `counts` {(day, kind, name, project): n}; returns what was kept.
 
-        Only days before the first live day (and inside the retention window) are kept, so history never double counts live data.
+        History never double counts live data: for every (day, kind, name) the calls already recorded live are
+        subtracted, so the days after the first live day (the city was closed, or skills were not tracked yet) keep
+        whatever the transcripts saw beyond it. With replace=False nothing is written (a partial run must not wipe a
+        complete earlier import) and the result says so.
         """
         today = today or local_day()
         floor = (date.fromisoformat(today) - timedelta(days=USAGE_RETENTION_DAYS)).isoformat()
         with self.lock, self.db:
-            live = self._meta('liveSince')
-            kept = {key: n for key, n in counts.items() if key[0] >= floor and (live is None or key[0] < live)}
+            live = {}
+            for day, kind, name, n in self.db.execute("SELECT day, kind, name, SUM(count) FROM usage WHERE source != 'history' GROUP BY day, kind, name"):
+                live[(day, kind, name)] = n
+            kept, budget = {}, dict(live)
+            for key in sorted(counts):
+                n = counts[key]
+                if key[0] < floor:
+                    continue
+                cover = min(n, budget.get(key[:3], 0))
+                budget[key[:3]] = budget.get(key[:3], 0) - cover
+                if n - cover > 0:
+                    kept[key] = n - cover
+            if not replace:
+                days = sorted({key[0] for key in kept})
+                result = {kind: sum(n for key, n in kept.items() if key[1] == kind) for kind in USAGE_KINDS}
+                result.update(files=files, skipped=skipped, replaced=False, **{'from': days[0] if days else None, 'to': days[-1] if days else None})
+                return result
             self.db.execute("DELETE FROM usage WHERE source='history'")
             self.db.executemany("INSERT INTO usage (day, source, kind, name, project, count) VALUES (?, 'history', ?, ?, ?, ?)", [(day, kind, name, project, n) for (day, kind, name, project), n in kept.items()])
             days = sorted({key[0] for key in kept})
             result = {kind: sum(n for key, n in kept.items() if key[1] == kind) for kind in USAGE_KINDS}
-            result.update(files=files, skipped=skipped, **{'from': days[0] if days else None, 'to': days[-1] if days else None})
+            result.update(files=files, skipped=skipped, replaced=True, **{'from': days[0] if days else None, 'to': days[-1] if days else None})
             self._set_meta('history', json.dumps({'importedAt': imported_at or now(), 'from': result['from'], 'to': result['to'], 'files': files, 'skipped': skipped}))
             return result
 

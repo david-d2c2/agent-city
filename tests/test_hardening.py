@@ -111,6 +111,73 @@ class BulkIsolationTests(TempCase):
         self.assertEqual(state['results'][0]['reason'], 'No se pudo leer la carpeta.')
 
 
+class PathParityTests(unittest.TestCase):
+    def test_python_path_key_matches_the_shared_fixture_used_by_the_browser_tests(self):
+        from agent_city.store import path_key
+        cases = json.loads((Path(__file__).parent / 'path-fixture.json').read_text(encoding='utf-8'))['cases']
+        self.assertGreaterEqual(len(cases), 20)
+        wrong = [(case['input'], case['key'], path_key(case['input'])) for case in cases if path_key(case['input']) != case['key']]
+        self.assertEqual(wrong, [])
+
+
+class PathMatchingTests(TempCase):
+    def store_with(self, *projects):
+        store = Store(str(self.base / 'data'))
+        self.addCleanup(store.close)
+        state = store._load()
+        state['organization']['projects'] = [{'id': pid, 'name': pid, 'spaceIds': ['office'], 'path': path} for pid, path in projects]
+        with store.db:
+            store._write(state)
+        store._org_gen += 1
+        return store
+
+    def test_windows_copy_as_path_quotes_are_ignored(self):
+        store = self.store_with(('p1', '"C:\\Work\\One"'))
+        self.assertEqual(store.project_for_cwd('C:\\Work\\One\\src'), 'p1')
+        self.assertEqual(store.project_for_cwd('"c:/work/one/"'), 'p1')
+        self.assertEqual(store.project_for_cwd('C:\\Work\\One-other'), '')
+
+    def test_a_tie_between_equal_paths_goes_to_the_first_project(self):
+        store = self.store_with(('zzz', 'C:\\Work\\Same'), ('aaa', 'C:\\Work\\Same'))
+        self.assertEqual(store.project_for_cwd('C:\\Work\\Same\\x'), 'zzz')
+        self.assertEqual(store.project_for_cwd('C:\\Work\\Same'), 'zzz')
+
+
+class RegistryClaimTests(TempCase):
+    def test_a_second_city_does_not_steal_the_hook_registry_from_a_live_one(self):
+        from agent_city import __main__ as entry
+        from agent_city.live import registry_file, write_registry
+        home = self.base / 'home'
+        home.mkdir()
+        with mock.patch.dict('os.environ', {'AGENT_CITY_HOME': str(home)}):
+            first_store = Store(str(self.base / 'a'))
+            self.addCleanup(first_store.close)
+            first = make_server(first_store, 0)
+            threading.Thread(target=first.serve_forever, daemon=True).start()
+            self.addCleanup(first.server_close)
+            self.addCleanup(first.shutdown)
+            write_registry(first.server_address[1], first.ingest_token)
+            before = registry_file().read_text(encoding='utf-8')
+
+            def second_city():
+                with mock.patch.object(sys, 'argv', ['agent_city', '--port', '0', '--data-dir', str(self.base / 'b')]):
+                    entry.main()
+
+            real = entry.make_server
+            made = []
+
+            def capture(store, port):
+                server = real(store, port)
+                made.append(server)
+                threading.Timer(0.8, server.shutdown).start()
+                return server
+
+            with mock.patch.object(entry, 'make_server', side_effect=capture):
+                second_city()
+            self.assertTrue(made)
+            self.assertEqual(registry_file().read_text(encoding='utf-8'), before)
+
+
 class ServerRobustnessTests(TempCase):
     def setUp(self):
         super().setUp()

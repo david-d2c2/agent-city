@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import * as model from "../web/model.js";
 
 test("room projects combine direct context and explicit specialty assignments by identity", () => {
@@ -322,10 +323,53 @@ test("role without spaces falls back to cwd; no cwd match is unassigned no-match
   assert.equal(m.unassigned[0].reason, "no-match");
 });
 
-test("ambiguous role names are unassigned and never fall back", () => {
+test("copies of the same agent are one match, not ambiguous: the session falls back like a single role", () => {
   const m = map([sess({ agentType: "TWIN", cwd: "/home/me/app" })]);
+  assert.deepEqual(Object.keys(m.bySpace), ["hq"]);
+  assert.equal(m.byRole.a1.length, 1);
+  assert.equal(m.byRole.a2.length, 1);
+  assert.deepEqual(m.unassigned, []);
+});
+
+test("different groups sharing a name are ambiguous, unassigned and never fall back", () => {
+  const catalog = [
+    { id: "g1", kind: "role", name: "Twin", validity: "valid" },
+    { id: "g2", kind: "role", name: "twin", validity: "invalid" }, // an invalid entry never joins a group
+  ];
+  const m = model.liveMapping({ sessions: [sess({ agentType: "TWIN", cwd: "/home/me/app" })] }, catalog, liveOrg);
   assert.deepEqual(m.bySpace, {});
+  assert.deepEqual(m.byRole, {});
   assert.equal(m.unassigned[0].reason, "ambiguous");
+});
+
+test("two same-runtime copies of one agent in one building light it and both carry the session", () => {
+  const catalog = [
+    { id: "u", kind: "role", name: "Reviewer", validity: "valid", source: { format: "claude-agents" } },
+    { id: "pl", kind: "role", name: "reviewer", validity: "valid", source: { format: "claude-agents" } },
+  ];
+  const org = { spaces: [{ id: "hq" }], projects: [], assignments: [{ roleId: "u", spaceId: "hq" }, { roleId: "pl", spaceId: "hq" }] };
+  const s = sess({ agentType: "Reviewer" });
+  const m = model.liveMapping({ sessions: [s] }, catalog, org);
+  assert.equal(m.bySpace.hq.count, 1); // one session lights the building once, not once per copy
+  assert.deepEqual(m.byRole.u, [s]);
+  assert.deepEqual(m.byRole.pl, [s]);
+  assert.deepEqual(m.unassigned, []);
+});
+
+test("copies of one group in different buildings light every one of those buildings", () => {
+  const catalog = [
+    { id: "u", kind: "role", name: "Reviewer", validity: "valid" },
+    { id: "pl", kind: "role", name: "Reviewer", validity: "valid" },
+    { id: "gone", kind: "role", name: "Reviewer", validity: "missing" },
+  ];
+  const org = {
+    spaces: [{ id: "hq" }, { id: "lab" }],
+    projects: [],
+    assignments: [{ roleId: "u", spaceId: "hq" }, { roleId: "pl", spaceId: "lab" }, { roleId: "gone", spaceId: "lab" }],
+  };
+  const m = model.liveMapping({ sessions: [sess({ agentType: "reviewer" })] }, catalog, org);
+  assert.deepEqual(Object.keys(m.bySpace).sort(), ["hq", "lab"]);
+  assert.equal(m.bySpace.lab.count, 1);
 });
 
 test("a session only matches roles of its own runtime, so cross-runtime twins are not ambiguous", () => {
@@ -363,6 +407,34 @@ test("path boundary: /proj must not match /proj-other", () => {
   assert.equal(model.projectForCwd(liveOrg, "C:\\Work\\Proj-other"), null);
   assert.equal(model.projectForCwd(liveOrg, ""), null);
   assert.equal(model.projectForCwd({ projects: [{ path: "/" }] }, "/x"), null);
+});
+
+test("pathKey drops one pair of surrounding quotes and outer spaces; projectForCwd matches quoted project paths", () => {
+  assert.equal(model.pathKey('"C:\\Work\\Proj"'), "c:/work/proj");
+  assert.equal(model.pathKey('  " C:\\Work\\Proj\\ "  '), "c:/work/proj");
+  assert.equal(model.pathKey('""x""'), '"x"');
+  assert.equal(model.pathKey('"'), '"');
+  assert.equal(model.cleanPath(' "C:\\Work\\Proj" '), "C:\\Work\\Proj"); // saved unquoted, case and slashes untouched
+  assert.equal(model.cleanPath("C:\\Work"), "C:\\Work");
+  const org = { projects: [{ id: "q", spaceIds: [], path: '"C:\\Work\\Quoted"' }] };
+  assert.equal(model.projectForCwd(org, "c:\\work\\quoted\\src").id, "q");
+});
+
+test("two projects with the same path: the first one in organization order wins", () => {
+  const org = {
+    projects: [
+      { id: "first", spaceIds: [], path: "C:\\Work\\Dup" },
+      { id: "second", spaceIds: [], path: '"c:/work/dup/"' },
+    ],
+  };
+  assert.equal(model.projectForCwd(org, "C:\\Work\\Dup\\src").id, "first");
+  assert.equal(model.projectForCwd({ projects: [...org.projects].reverse() }, "C:\\Work\\Dup").id, "second");
+});
+
+test("pathKey agrees with the shared fixture (the Python implementation asserts the same file)", () => {
+  const { cases } = JSON.parse(readFileSync(new URL("./path-fixture.json", import.meta.url), "utf8"));
+  assert.ok(cases.length >= 20);
+  for (const { input, key } of cases) assert.equal(model.pathKey(input), key, JSON.stringify(input));
 });
 
 test("idle and inactive sessions never light buildings", () => {
@@ -603,6 +675,35 @@ test("groupKey ignores case, accents and separators but never kind", () => {
   assert.notEqual(key("ux researcher"), key("uxresearcher"));
 });
 
+test("groupKey keeps + and # in the word so C++, C# and C stay apart", () => {
+  const key = (name) => model.groupKey({ id: "x", kind: "skill", name });
+  assert.equal(key("C++ Pro"), "skill:c++ pro");
+  assert.notEqual(key("C++ Pro"), key("C# Pro"));
+  assert.notEqual(key("C++ Pro"), key("C Pro"));
+  assert.notEqual(key("C# Pro"), key("C Pro"));
+  assert.equal(key("C Pro"), key("c-pro"));
+  assert.equal(key("c++ pro"), key("C++  PRO"));
+  assert.equal(key("UX Researcher"), key("UX_researcher"));
+  assert.equal(key("Diseño C#"), key("diseno c#"));
+});
+
+test("a missing copy groups with its valid replacement instead of counting as another agent", () => {
+  const items = [
+    copy("old", "Planner", { validity: "missing", description: "v1" }),
+    claudeCopy("new", "planner", { validity: "valid", description: "v2" }),
+    copy("other", "Writer", { validity: "invalid", name: "" }),
+  ];
+  assert.equal(model.groupKey(items[0]), model.groupKey(items[1]));
+  const groups = model.groupItems(items);
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups[0].items.map((i) => i.id), ["old", "new"]); // the missing copy stays listed for «Copias»
+  assert.equal(groups[0].primary.id, "new"); // a valid copy is preferred as primary
+  assert.deepEqual(model.countSummary(items), { unique: 2, copies: 3 });
+  const onlyMissing = model.groupItems([copy("m1", "Gone", { validity: "missing" }), claudeCopy("m2", "gone", { validity: "missing" })]);
+  assert.equal(onlyMissing.length, 1);
+  assert.equal(onlyMissing[0].primary.id, "m1");
+});
+
 test("groupKey keeps non-Latin names apart instead of collapsing them to empty", () => {
   const key = (name) => model.groupKey({ id: "x", kind: "skill", name });
   assert.equal(key("日本語 ツール"), "skill:日本語 ツール");
@@ -618,7 +719,7 @@ test("groupKey leaves invalid items and empty names alone", () => {
   assert.equal(model.groupKey({ id: "a", kind: "role", name: "" }), "id:a");
   assert.equal(model.groupKey({ id: "b", kind: "role", name: " -- " }), "id:b");
   assert.equal(model.groupKey({ id: "c", kind: "role", name: "X", validity: "invalid" }), "id:c");
-  assert.equal(model.groupKey({ id: "d", kind: "role", name: "X", validity: "missing" }), "id:d");
+  assert.equal(model.groupKey({ id: "d", kind: "role", name: "", validity: "missing" }), "id:d");
   assert.equal(model.groupKey(null), "id:undefined");
   const groups = model.groupItems([
     { id: "a", kind: "role", name: "", validity: "invalid" },
@@ -686,14 +787,7 @@ test("countSummary reports unique groups and raw copies", () => {
   assert.deepEqual(model.countSummary([]), { unique: 0, copies: 0 });
 });
 
-test("count labels are honest, singular/plural-correct and Spanish", () => {
-  assert.equal(model.countLabel("role", { unique: 145, copies: 229 }), "145 roles únicos · 229 copias");
-  assert.equal(model.countLabel("role", { unique: 145, copies: 145 }), "145 roles");
-  assert.equal(model.countLabel("role", { unique: 1, copies: 1 }), "1 rol");
-  assert.equal(model.countLabel("role", { unique: 1, copies: 2 }), "1 rol único · 2 copias");
-  assert.equal(model.countLabel("skill", { unique: 1, copies: 3 }), "1 skill única · 3 copias");
-  assert.equal(model.countLabel("skill", { unique: 471, copies: 1647 }), "471 skills únicas · 1.647 copias");
-  assert.equal(model.countLabel("skill", { unique: 0, copies: 0 }), "0 skills");
+test("unit labels are singular/plural-correct and Spanish", () => {
   assert.equal(model.unitLabel("skill", 1), "skill");
   assert.equal(model.unitLabel("role", 2, true), "roles únicos");
 });
@@ -1091,6 +1185,28 @@ test("projectAgentStats tolerates missing usage and an empty organization", () =
     assert.equal(stats.pa.used, 0);
   }
   assert.deepEqual(model.projectAgentStats(null, undefined, undefined), {});
+});
+
+test("projectUsedRoleIds lists every copy of the agents only used in a project; filterCatalog unions them with assignments", () => {
+  const rows = [
+    { projectId: "pa", kind: "agent", name: "Planner", total: 3 },
+    { projectId: "pa", kind: "agent", name: "UX-Researcher", total: 1 },
+    { projectId: "pa", kind: "agent", name: "Explore", total: 9 },
+    { projectId: "pa", kind: "agent", name: "Writer", total: 0 },
+    { projectId: "pb", kind: "skill", name: "Planner", total: 4 },
+    null,
+  ];
+  const extra = model.projectUsedRoleIds(scaleOrg, scaleCatalog, rows);
+  assert.deepEqual(extra, { pa: ["c1", "c2", "c3"] });
+  const ids = (filters, ex) => model.filterCatalog(scaleCatalog, scaleOrg, filters, ex).map((i) => i.id);
+  // without the extra set only the assigned agents (c4, c1) appear; with it the used ones join, copies included
+  assert.deepEqual(ids({ project: "pa", kind: "role" }), ["c1", "c4"]);
+  assert.deepEqual(ids({ project: "pa", kind: "role" }, { projectRoleIds: extra }), ["c1", "c2", "c3", "c4"]);
+  assert.deepEqual(ids({ project: "pb", kind: "role" }, { projectRoleIds: extra }), []);
+  assert.deepEqual(ids({ project: "pa", kind: "role" }, {}), ["c1", "c4"]);
+  assert.deepEqual(ids({ project: "pa", kind: "role" }, null), ["c1", "c4"]);
+  assert.deepEqual(model.projectUsedRoleIds(null, undefined, undefined), {});
+  assert.deepEqual(model.projectUsedRoleIds(scaleOrg, scaleCatalog, "x"), {});
 });
 
 test("liveByProject groups active sessions by the project that owns their folder", () => {

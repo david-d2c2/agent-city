@@ -127,6 +127,7 @@ def import_claude_history(store, projects_dir=None, now=None, max_files=5000, ma
         if not complete:
             partial = True
             break
-    imported = store.replace_usage_history(counts, files, skipped, today=now.date().isoformat(), imported_at=now.astimezone().isoformat())
+    # A run cut short by the time or file budget must not wipe a complete earlier import; with no earlier history it is kept.
+    imported = store.replace_usage_history(counts, files, skipped, today=now.date().isoformat(), imported_at=now.astimezone().isoformat(), replace=not (partial and store.has_usage_history()))
     imported['partial'] = partial
     return imported

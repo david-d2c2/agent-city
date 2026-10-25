@@ -114,7 +114,11 @@ def make_server(store, port=4317, web_dir=None):
                 usage = usage_of(event)
                 if usage:
                     cwd = event.get('cwd') or self.server.live.last_cwd(body['source'], event['session_id'])
-                    store.record_usage(body['source'], *usage, project=store.project_for_cwd(cwd))
+                    try:
+                        project = store.project_for_cwd(cwd)
+                    except Exception:  # a resolver hiccup costs the project attribution, never the count itself
+                        project = ''
+                    store.record_usage(body['source'], *usage, project=project)
             except Exception:
                 pass
             self.respond(204, b'')

@@ -1,0 +1,132 @@
+{
+  "cases": [
+    {
+      "input": "C:\\Work\\Proj",
+      "key": "c:/work/proj"
+    },
+    {
+      "input": "c:/work/proj",
+      "key": "c:/work/proj"
+    },
+    {
+      "input": "C:\\WORK\\PROJ\\",
+      "key": "c:/work/proj"
+    },
+    {
+      "input": "C:/Work/Proj//",
+      "key": "c:/work/proj"
+    },
+    {
+      "input": "C:\\Work\\Proj\\\\",
+      "key": "c:/work/proj"
+    },
+    {
+      "input": "\"C:\\Work\\Proj\"",
+      "key": "c:/work/proj"
+    },
+    {
+      "input": "  \"C:\\Work\\Proj\\\"  ",
+      "key": "c:/work/proj"
+    },
+    {
+      "input": "\"  C:\\Work\\Proj  \"",
+      "key": "c:/work/proj"
+    },
+    {
+      "input": "   C:\\Work\\Proj   ",
+      "key": "c:/work/proj"
+    },
+    {
+      "input": "C:\\",
+      "key": "c:"
+    },
+    {
+      "input": "C:",
+      "key": "c:"
+    },
+    {
+      "input": "c:/",
+      "key": "c:"
+    },
+    {
+      "input": "\"C:\\\"",
+      "key": "c:"
+    },
+    {
+      "input": "/",
+      "key": "/"
+    },
+    {
+      "input": "/home/me/App",
+      "key": "/home/me/app"
+    },
+    {
+      "input": "/home/me/app/",
+      "key": "/home/me/app"
+    },
+    {
+      "input": "/Home/Me/App///",
+      "key": "/home/me/app"
+    },
+    {
+      "input": "\\\\Server\\Share\\Proj",
+      "key": "//server/share/proj"
+    },
+    {
+      "input": "//server/share/proj/",
+      "key": "//server/share/proj"
+    },
+    {
+      "input": "\"\\\\Server\\Share\"",
+      "key": "//server/share"
+    },
+    {
+      "input": "C:\\Mi Carpeta\\Proyecto Ñandú",
+      "key": "c:/mi carpeta/proyecto ñandú"
+    },
+    {
+      "input": "C:\\Users\\Ana\\Área Ñ\\",
+      "key": "c:/users/ana/área ñ"
+    },
+    {
+      "input": "relative\\dir/sub",
+      "key": "relative/dir/sub"
+    },
+    {
+      "input": "./rel/",
+      "key": "./rel"
+    },
+    {
+      "input": "C:\\Work\\Pro\"j",
+      "key": "c:/work/pro\"j"
+    },
+    {
+      "input": "\"unbalanced",
+      "key": "\"unbalanced"
+    },
+    {
+      "input": "unbalanced\"",
+      "key": "unbalanced\""
+    },
+    {
+      "input": "\"\"",
+      "key": ""
+    },
+    {
+      "input": "\"",
+      "key": "\""
+    },
+    {
+      "input": "",
+      "key": ""
+    },
+    {
+      "input": "   ",
+      "key": ""
+    },
+    {
+      "input": "x",
+      "key": "x"
+    }
+  ]
+}
