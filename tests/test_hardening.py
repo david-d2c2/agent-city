@@ -18,7 +18,8 @@ class TempCase(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        self.base = Path(folder.name)
+        # Resolved like approved_path does: CI runners hand out 8.3 short names (RUNNER~1) that resolve() expands.
+        self.base = Path(folder.name).resolve()
 
 
 class CatalogHardeningTests(TempCase):
